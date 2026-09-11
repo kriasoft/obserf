@@ -1,0 +1,77 @@
+{
+  "name": "@obserf/cli",
+  "version": "0.1.0",
+  "description": "Finds public conversations and listings where mentioning your project could help someone, ranks them, and drafts what to say. It never posts.",
+  "license": "Apache-2.0",
+  "homepage": "https://obserf.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kriasoft/obserf.git"
+  },
+  "bugs": "https://github.com/kriasoft/obserf/issues",
+  "author": "Konstantin Tarkus",
+  "keywords": [
+    "marketing",
+    "open-source",
+    "developer-marketing",
+    "cli",
+    "claude",
+    "local-first",
+    "sqlite",
+    "bun"
+  ],
+  "packageManager": "bun@1.4.2",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "types": "./index.ts",
+  "files": [
+    "*.ts",
+    "db/*.ts",
+    "drizzle/*.sql",
+    "pipeline/*.ts",
+    "sources/*.ts",
+    "web/*.ts",
+    "web/*.tsx",
+    "web/*.css",
+    "web/index.html",
+    "!**/*.test.ts",
+    "!srcpack.config.ts",
+    "!drizzle.config.ts"
+  ],
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "obserf": "./cli.ts"
+  },
+  "scripts": {
+    "obserf": "bun run cli.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:studio": "drizzle-kit studio",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "fmt": "bun --bun oxfmt",
+    "fmt:check": "bun --bun oxfmt --check"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.267",
+    "drizzle-orm": "^0.45.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "better-sqlite3": "^13.0.3",
+    "drizzle-kit": "^0.31.10",
+    "oxfmt": "^0.67.0",
+    "typescript": "^7"
+  }
+}

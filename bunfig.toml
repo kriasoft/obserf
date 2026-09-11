@@ -1,0 +1,5 @@
+[test]
+# Pins every test to a throwaway workspace. Without it `bun test` resolves one
+# from the working directory, so running it inside a workspace would point the
+# database and its snapshots at the operator's real state.
+preload = ["./test/setup.ts"]

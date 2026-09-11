@@ -1,0 +1,4 @@
+# Migrations are identified by the SHA-256 of their bytes (db/migrate.ts), so a
+# checkout that rewrote line endings would make an unchanged migration look
+# edited and be refused.
+*.sql text eol=lf

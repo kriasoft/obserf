@@ -1,0 +1,93 @@
+# The point of this job is not more testing — the suite is fast and runs locally.
+# It is that the first machine other than the author's should be GitHub's rather
+# than a user's, and that the thing proved to work is the tarball npm would
+# actually serve. Obserf ships raw TypeScript, runs on Bun, carries its
+# migrations as package data, and scaffolds a workspace that installs itself;
+# none of that is exercised by running tests in a checkout.
+#
+# Deliberately offline. A scan against live Hacker News or GitHub would turn a
+# deterministic suite into somebody else's uptime monitor, and there are no
+# credentials to give it. The live clean-room scan stays a manual pre-release step.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No version input: the action reads `packageManager` from package.json,
+      # so the pinned Bun is declared in one place rather than two.
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Format
+        run: bun run fmt:check
+
+      - name: Types
+        run: bun run typecheck
+
+      - name: Tests
+        run: bun test
+
+      # vocabulary.ts is shared with the browser, so a stray import in it drags
+      # bun:sqlite, the Agent SDK or child_process into the inbox bundle. That
+      # fails at runtime in a browser, which no test here would catch.
+      - name: Browser bundle carries no server imports
+        run: |
+          bun build web/index.html --outdir /tmp/bundle
+          if grep -rqE 'bun:sqlite|child_process|claude-agent-sdk|drizzle-orm' /tmp/bundle; then
+            echo "::error::a server-only import reached the browser bundle"
+            grep -roE 'bun:sqlite|child_process|claude-agent-sdk|drizzle-orm' /tmp/bundle | sort -u
+            exit 1
+          fi
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No version input: the action reads `packageManager` from package.json,
+      # so the pinned Bun is declared in one place rather than two.
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      # `files` is an explicit whitelist that fails closed: a new source file
+      # left out of it breaks here rather than reaching a user, which is the
+      # trade that keeps an operator's database out of a published tarball.
+      - name: Pack
+        run: |
+          npm pack --pack-destination /tmp >/dev/null
+          echo "TARBALL=$(ls /tmp/obserf-*.tgz)" >> "$GITHUB_ENV"
+
+      - name: No database is ever in the tarball
+        run: |
+          if tar tzf "$TARBALL" | grep -E '\.db(-wal|-shm)?$'; then
+            echo "::error::the tarball contains a database"
+            exit 1
+          fi
+
+      # What a user does, in the order they do it, with nothing from this
+      # checkout on the path.
+      - name: A workspace built from the tarball works
+        run: |
+          set -eux
+          mkdir -p /tmp/tool && cd /tmp/tool && bun add "$TARBALL"
+          cd /tmp && ./tool/node_modules/.bin/obserf init workspace
+          cd /tmp/workspace && bun add "@obserf/cli@$TARBALL"
+          bun run typecheck                    # the scaffolded tsconfig checks the example profile
+          bun run obserf projects              # resolves `obserf` from a profile
+          bun run obserf list                  # creates and migrates the database
+          test -f .obserf/obserf.db
+          bun run obserf backup                # snapshot and restore round-trip
+          bun run obserf restore

@@ -1,0 +1,51 @@
+# dependencies (bun install)
+node_modules
+
+# output
+out
+dist
+*.tgz
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+
+
+# personal notes and prompts
+*.local.md
+
+tmp/
+.srcpack/
+srcpack.config.ts
+# state, if an obserf command is run from this checkout
+.obserf/
+
+# a database, wherever it lands. Obserf's live in a workspace; one that appears
+# in this repository is somebody's findings, notes and drafts, and this
+# repository is published.
+*.db
+*.db-wal
+*.db-shm
