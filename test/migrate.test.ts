@@ -1,9 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseSnapshotName } from "../db/backup";
 import { migrate } from "../db/migrate";
+import { backupsDir } from "../workspace";
 import { getTableName, is } from "drizzle-orm";
 import { SQLiteColumn, SQLiteTable, getTableConfig } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
@@ -155,6 +157,28 @@ test("a migration whose SQL changed after it was applied is refused", () => {
 
   writeFileSync(join(dir, "0000_initial.sql"), "CREATE TABLE b (id INTEGER PRIMARY KEY);");
   expect(() => migrate(db, dir)).toThrow(/0000_initial\.sql has changed since this database/);
+});
+
+/** Every snapshot in the shared workspace, which other tests write to as well. */
+const snapshots = () => (existsSync(backupsDir) ? readdirSync(backupsDir) : []);
+
+// The way back from an upgrade that did the wrong thing is this file, and an
+// operator looking for it in a directory of snapshots is reading the labels: one
+// that says `manual` is one they would think they took themselves.
+test("an upgrade snapshots the database first, and says that is why", () => {
+  const db = database();
+  const dir = mkdtempSync(join(tmpdir(), "obserf-mig-"));
+  dirs.push(dir);
+  writeFileSync(join(dir, "0000_a.sql"), "CREATE TABLE a (id INTEGER PRIMARY KEY);");
+  migrate(db, dir);
+
+  // Only now is there history to lose, which is what the snapshot is for.
+  const before = new Set(snapshots());
+  writeFileSync(join(dir, "0001_b.sql"), "CREATE TABLE b (id INTEGER PRIMARY KEY);");
+  migrate(db, dir);
+
+  const taken = snapshots().filter((name) => !before.has(name));
+  expect(taken.map((name) => parseSnapshotName(name)?.reason)).toEqual(["upgrade"]);
 });
 
 // drizzle-kit renders most schema changes as a table rebuild: create a copy,

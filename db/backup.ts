@@ -37,6 +37,40 @@ function prefixFor(path: string): string {
   return `${basename(path)}.${key}.`;
 }
 
+/** Why a snapshot was taken, recorded in its filename. */
+export type SnapshotReason = "manual" | "upgrade" | "replaced";
+
+/** A snapshot of this database, as its own filename describes it. */
+export interface Snapshot {
+  path: string;
+  takenAt: Date;
+  /** Null when the filename has no reason, as with older snapshots. */
+  reason: SnapshotReason | null;
+}
+
+/**
+ * Parses the timestamp and optional reason suffix; `backups()` checks the
+ * database prefix separately. Older names without a reason are accepted.
+ *
+ * Filename timestamps survive copying even when modification times change.
+ * Match the tail so a timestamp in the database's own name cannot be mistaken
+ * for the snapshot's date.
+ */
+export function parseSnapshotName(name: string): Omit<Snapshot, "path"> | null {
+  const match =
+    /\.(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z(?:\.(manual|upgrade|replaced))?\.db$/.exec(
+      basename(name),
+    );
+  if (!match) return null;
+  const [, date, hour, minute, second, ms, reason] = match;
+  const iso = `${date}T${hour}:${minute}:${second}.${ms}Z`;
+  const takenAt = new Date(iso);
+  // Reject dates that JavaScript normalizes, such as February 31st, rather
+  // than silently changing their position in the restore list.
+  if (Number.isNaN(takenAt.getTime()) || takenAt.toISOString() !== iso) return null;
+  return { takenAt, reason: (reason as SnapshotReason) ?? null };
+}
+
 /**
  * Returns the snapshot's path, or null when there is no database yet — a fresh
  * workspace has nothing to lose.
@@ -44,13 +78,19 @@ function prefixFor(path: string): string {
  * `VACUUM INTO` rather than a file copy: it is SQLite's own online backup, so it
  * writes a consistent snapshot that includes whatever is still in the WAL.
  * Copying `obserf.db` alone would silently drop the most recent writes.
+ *
+ * The reason goes after the timestamp, so the names still sort chronologically
+ * and a snapshot taken before reasons existed still matches the prefix.
  */
-export function backup(path: string = databasePath): string | null {
+export function backup(
+  path: string = databasePath,
+  reason: SnapshotReason = "manual",
+): string | null {
   if (!existsSync(path)) return null;
 
   mkdirSync(backupsDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const target = join(backupsDir, `${prefixFor(path)}${stamp}.db`);
+  const target = join(backupsDir, `${prefixFor(path)}${stamp}.${reason}.db`);
 
   const db = new Database(path, { readwrite: true, create: false });
   try {
@@ -64,14 +104,23 @@ export function backup(path: string = databasePath): string | null {
   return target;
 }
 
-/** This database's snapshots, newest last; ISO-8601 names sort chronologically. */
-export function backups(): string[] {
+/**
+ * This database's snapshots, oldest first.
+ *
+ * Filters by database prefix and a valid timestamp/reason suffix, without
+ * inspecting file contents. Unrecognized names cannot participate in automatic
+ * newest-snapshot selection, but can still be restored explicitly.
+ */
+export function backups(): Snapshot[] {
   if (!existsSync(backupsDir)) return [];
   const prefix = prefixFor(databasePath);
   return readdirSync(backupsDir)
-    .filter((name) => name.startsWith(prefix) && name.endsWith(".db"))
-    .sort()
-    .map((name) => join(backupsDir, name));
+    .filter((name) => name.startsWith(prefix))
+    .flatMap((name) => {
+      const parsed = parseSnapshotName(name);
+      return parsed ? [{ path: join(backupsDir, name), ...parsed }] : [];
+    })
+    .sort((a, b) => a.takenAt.getTime() - b.takenAt.getTime());
 }
 
 /**
@@ -84,7 +133,11 @@ export function backups(): string[] {
  * just took of the good one.
  */
 export function restore(from?: string): { restored: string; replaced: string | null } {
-  const restored = from ?? backups().at(-1);
+  // A bare name is resolved against the snapshot directory, because that is what
+  // `obserf backups` prints and what an operator will retype. Anything carrying
+  // a directory is a path they meant literally, `./snapshot.db` included.
+  const named = from && basename(from) === from ? join(backupsDir, from) : from;
+  const restored = named ?? backups().at(-1)?.path;
   if (!restored) throw new Error(`No snapshots of ${basename(databasePath)} in ${backupsDir}.`);
   if (!existsSync(restored)) throw new Error(`No snapshot at ${restored}.`);
   readable(restored);
@@ -93,7 +146,7 @@ export function restore(from?: string): { restored: string; replaced: string | n
   // whether a command may create one.
   requireCreatableDatabase();
 
-  const replaced = backup();
+  const replaced = backup(databasePath, "replaced");
   copyFileSync(restored, databasePath);
   // These describe the database that was just overwritten. Left in place, SQLite
   // would replay them over the one that replaced it.
