@@ -144,6 +144,47 @@ describe("the Hacker News adapter's story-or-comment call", () => {
 });
 
 /**
+ * A comment under a killed submission can have enough text to pass the thin
+ * gate. Filter the enclosing story's marker while retaining live comment hits.
+ */
+test("drops stories and comments whose story title is exactly [dead]", async () => {
+  const real = globalThis.fetch;
+  const hit = (objectID: string, over: Record<string, unknown>) => ({
+    objectID,
+    author: "a",
+    created_at: "2026-09-01T00:00:00Z",
+    ...over,
+  });
+  globalThis.fetch = (async (_input: URL) =>
+    new Response(
+      JSON.stringify({
+        hits: [
+          hit("1", {
+            _tags: ["comment"],
+            story_title: "[dead]",
+            comment_text: "This reply has enough substance to survive the thin gate unchanged.",
+          }),
+          hit("2", { _tags: ["story"], title: "[dead]" }),
+          hit("3", { _tags: ["story"], title: "A live story" }),
+          hit("4", {
+            _tags: ["comment"],
+            story_title: "A live thread",
+            comment_text: "Still here",
+          }),
+        ],
+      }),
+      { headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const found = await hackerNewsSource.search(profileWith({ search: ["q"] }), { limit: 10 });
+    expect(found.map((c) => c.title)).toEqual(["A live story", "A live thread"]);
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+/**
  * Regression: a blank entry beside a real one passed availability and was still
  * sent. Hacker News is the dangerous case, because Algolia reads an empty query
  * as every story it has rather than rejecting it.
