@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { selectSources, sources } from "../sources";
+import { braveSource } from "../sources/brave";
 import { hackerNewsSource, toCandidate } from "../sources/hackernews";
 import type { ProjectProfile } from "../project";
 
@@ -141,6 +142,99 @@ describe("the Hacker News adapter's story-or-comment call", () => {
       "https://news.ycombinator.com/item?id=1",
     );
   });
+});
+
+/**
+ * A host-only venue would miss guidance keyed to a subreddit or repository.
+ */
+test("derives Brave venue keys from Reddit and GitHub paths, falling back to hosts", async () => {
+  const real = globalThis.fetch;
+  const results = [
+    "https://www.reddit.com/r/golang/comments/abc/a_thread/",
+    "https://old.reddit.com/r/rust/comments/def/another_thread/",
+    "https://reddit.com/r/golang",
+    // No subreddit in the path, or a host outside reddit.com.
+    "https://reddit.com/user/someone",
+    "https://notreddit.com/r/golang/comments/x/y/",
+    "https://reddit.com.example.net/r/golang/comments/x/y/",
+    // Repository roots and deeper paths share a venue key.
+    "https://github.com/acme/awesome-logging",
+    "https://github.com/acme/awesome-logging/tree/main/docs",
+    "https://github.com/acme/widget/issues/12",
+    "https://github.com/acme",
+    // Path-based naming does not verify that the first two segments name a repo.
+    "https://github.com/topics/rust",
+    "https://news.ycombinator.com/item?id=1",
+  ];
+  globalThis.fetch = (async (_input: URL) =>
+    new Response(
+      JSON.stringify({
+        web: { results: results.map((url) => ({ url, title: "T", description: "d" })) },
+      }),
+      { headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const found = await braveSource.search(profileWith({ brave: ["q"] }), { limit: 20 });
+    expect(found.map((candidate) => candidate.venue)).toEqual([
+      "r/golang",
+      "r/rust",
+      "r/golang",
+      "reddit.com",
+      "notreddit.com",
+      "reddit.com.example.net",
+      "github.com/acme/awesome-logging",
+      "github.com/acme/awesome-logging",
+      "github.com/acme/widget",
+      // One segment names an owner, not a repository.
+      "github.com",
+      "github.com/topics/rust",
+      "news.ycombinator.com",
+    ]);
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+/**
+ * A comment under a killed submission can have enough text to pass the thin
+ * gate. Filter the enclosing story's marker while retaining live comment hits.
+ */
+test("drops stories and comments whose story title is exactly [dead]", async () => {
+  const real = globalThis.fetch;
+  const hit = (objectID: string, over: Record<string, unknown>) => ({
+    objectID,
+    author: "a",
+    created_at: "2026-09-01T00:00:00Z",
+    ...over,
+  });
+  globalThis.fetch = (async (_input: URL) =>
+    new Response(
+      JSON.stringify({
+        hits: [
+          hit("1", {
+            _tags: ["comment"],
+            story_title: "[dead]",
+            comment_text: "This reply has enough substance to survive the thin gate unchanged.",
+          }),
+          hit("2", { _tags: ["story"], title: "[dead]" }),
+          hit("3", { _tags: ["story"], title: "A live story" }),
+          hit("4", {
+            _tags: ["comment"],
+            story_title: "A live thread",
+            comment_text: "Still here",
+          }),
+        ],
+      }),
+      { headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const found = await hackerNewsSource.search(profileWith({ search: ["q"] }), { limit: 10 });
+    expect(found.map((c) => c.title)).toEqual(["A live story", "A live thread"]);
+  } finally {
+    globalThis.fetch = real;
+  }
 });
 
 /**

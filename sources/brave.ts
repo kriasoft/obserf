@@ -20,6 +20,31 @@ interface BraveResponse {
 }
 
 /**
+ * Derive Reddit and GitHub venue keys from the URL so verified guidance can
+ * match results from Brave as well as the dedicated adapters.
+ *
+ * GitHub uses the first two non-empty path segments without verifying a
+ * repository: `/topics/rust` therefore becomes `github.com/topics/rust`.
+ * Other URLs retain the normalized host.
+ */
+function venueOf(url: string): string {
+  const host = hostOf(url);
+
+  // A matching host means hostOf parsed the URL, so these branches can parse it.
+  if (host === "reddit.com" || host.endsWith(".reddit.com")) {
+    const subreddit = new URL(url).pathname.match(/^\/r\/([A-Za-z0-9_]+)(?:\/|$)/)?.[1];
+    return subreddit ? `r/${subreddit}` : host;
+  }
+
+  if (host === "github.com") {
+    const [owner, name] = new URL(url).pathname.split("/").filter(Boolean);
+    return owner && name ? `github.com/${owner}/${name}` : host;
+  }
+
+  return host;
+}
+
+/**
  * Brave Web Search. The free tier allows one query per second, so queries run
  * sequentially with a delay rather than in parallel — the cap is hard, and
  * exceeding it fails the whole scan rather than degrading it.
@@ -78,7 +103,7 @@ export const braveSource: Source = {
           url: result.url,
           title: plainText(result.title),
           excerpt: plainText(result.description),
-          venue: hostOf(result.url),
+          venue: venueOf(result.url),
           publishedAt:
             publishedAt && !Number.isNaN(publishedAt.getTime()) ? publishedAt : undefined,
           raw: result,

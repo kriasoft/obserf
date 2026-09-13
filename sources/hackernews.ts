@@ -6,7 +6,7 @@ import type { Candidate, SearchOptions, Source } from "./types";
 
 const ENDPOINT = "https://hn.algolia.com/api/v1/search";
 
-/** Algolia omits fields it has no value for rather than returning null. */
+/** Algolia hits may omit fields or return null for unavailable values. */
 interface AlgoliaHit {
   objectID: string;
   title?: string | null;
@@ -91,7 +91,12 @@ export const hackerNewsSource: Source = {
       }
 
       const body = (await response.json()) as { hits?: AlgoliaHit[] };
-      for (const hit of body.hits ?? []) candidates.push(toCandidate(hit));
+      for (const hit of body.hits ?? []) {
+        // HN closes killed submissions to new comments. Check the exact marker
+        // in the story title or the comment's enclosing story title.
+        if ((hit.title ?? hit.story_title) === "[dead]") continue;
+        candidates.push(toCandidate(hit));
+      }
     }
 
     return candidates;

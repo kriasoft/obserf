@@ -4,13 +4,14 @@
  * pipeline modules hold the logic and are callable without it.
  */
 
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 // The version that scaffolded a workspace is the one known to work with it.
 import { version } from "./package.json";
 import { parseArgs } from "node:util";
 import { initWorkspace } from "./init";
 import {
   MARKER,
+  backupsDir,
   findWorkspaceRoot,
   loadProjects,
   loadProjectsIfAny,
@@ -69,6 +70,7 @@ Usage: obserf <command> [options]
   backup        Snapshot the database
   backups       List this database's snapshots
   restore [f]   Replace the database with a snapshot (newest by default)
+                  f is a bare name from obserf backups, or ./a/path
   serve         Open the local review inbox
                   --port <n>    Default 4000
 
@@ -154,8 +156,19 @@ async function main(): Promise<void> {
     case "backups": {
       requireWorkspace();
       const found = backups();
-      if (!found.length) console.log(dim(`No snapshots of ${databasePath}.`));
-      for (const path of found) console.log(path);
+      if (!found.length) {
+        console.log(dim(`No snapshots of ${databasePath}.`));
+        return;
+      }
+      // Bare names can be passed directly to `restore`.
+      console.log(dim(`In ${backupsDir}, oldest first:`));
+      for (const { path, takenAt, reason } of found) {
+        // Display local time; the filename retains the UTC timestamp.
+        const when = `${takenAt.toDateString().slice(4)} ${takenAt.toTimeString().slice(0, 5)}`;
+        console.log(
+          `  ${dim(when.padEnd(17))} ${(reason ?? "unlabelled").padEnd(11)} ${basename(path)}`,
+        );
+      }
       return;
     }
     case "projects": {

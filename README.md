@@ -243,7 +243,7 @@ bun run obserf restore           # replace the database with the newest
 bun run obserf restore <file>    # or with a specific one
 ```
 
-Snapshots are written with SQLite's `VACUUM INTO` to `.obserf/backups/` in the workspace, named for the database they came from, the moment they were taken, and why — `manual` when you asked, `upgrade` from just before a migration, `replaced` from what a restore overwrote. `obserf backups` shows that, because they are otherwise the same name at different milliseconds and the list is read at the moment one of them is about to overwrite your database. `restore` takes the bare name it prints, or any path. A restore snapshots what it replaces, so it is itself reversible. Nothing is pruned automatically.
+Snapshots are written with SQLite's `VACUUM INTO` to `.obserf/backups/` in the workspace, named for the database they came from, the moment they were taken, and why — `manual` when you asked, `upgrade` from just before a migration, `replaced` from what a restore overwrote. `obserf backups` lists recognized snapshots oldest first, showing local time and the reason (`unlabelled` for older snapshots without one). `restore` without an argument selects the newest listed snapshot. A bare filename resolves inside the backup directory; use `./snapshot.db` for a file in the current directory, or supply another relative or absolute path. An explicitly named file need not follow the snapshot naming convention. A restore snapshots what it replaces, so it is itself reversible. Nothing is pruned automatically.
 
 <!-- prettier-ignore -->
 > [!WARNING]

@@ -96,7 +96,7 @@ function attempt(db: Database, files: Map<string, string>): boolean {
     // the file, so it happens before the lock; a snapshot that cannot be written
     // stops the upgrade rather than letting it proceed without a way back.
     if (seen.size) {
-      const snapshot = backup(db.filename);
+      const snapshot = backup(db.filename, "upgrade");
       if (snapshot) console.error(`Upgrading the database. Snapshot → ${snapshot}`);
       snapshotted = true;
     }
