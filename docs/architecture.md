@@ -63,7 +63,14 @@ pipeline/
 web/
   server.ts          Bun.serve with routes and HTML import
   index.html         The inbox's page, which loads app.tsx
-  app.tsx            Review inbox (React)
+  app.tsx            Review inbox (React): the list, triage and undo state
+  detail.tsx         The selected finding: evidence, verdict, note, drafts
+  action-bar.tsx     Decisions and drafting, pinned under the finding
+  undo-toast.tsx     The last decision, its undo and its follow-up
+  scan-status.tsx    Whether each project's latest scan saw everything
+  keyboard.tsx       Shortcut keys, the guard every handler shares, and ?
+  theme.tsx          System, light or dark
+  api.ts             Response shapes and the fetch helpers
 project.ts           The ProjectProfile contract, defineProject, venueRuleFor
 workspace.ts         Finding a workspace, its paths, loading its profiles
 init.ts              obserf init: the scaffold, and the placeholders it leaves
