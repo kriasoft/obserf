@@ -7,7 +7,17 @@ import {
   type DismissalCategory,
   type TriageStatus,
 } from "../vocabulary";
-import { type ListedFinding, type TriageOptions, messageOf, requestJson, postJson } from "./api";
+import {
+  type ListedFinding,
+  type RunsMarker,
+  type TriageOptions,
+  covers,
+  messageOf,
+  parseMarker,
+  postJson,
+  requestJson,
+  requestJsonWithHeaders,
+} from "./api";
 import { TRIAGE_KEYS, isShortcut, ShortcutsDialog } from "./keyboard";
 import { ThemeToggle, applyTheme, storedTheme } from "./theme";
 import { type UndoRecord, UndoToast } from "./undo-toast";
@@ -146,6 +156,11 @@ function App() {
   // Filter changes fire overlapping requests; without this the slower earlier
   // one can land last and repopulate the list with the previous filter.
   const listTicket = useRef(0);
+  /**
+   * The run record as it stood when the rows on screen were read, sent with
+   * them; null before the first list or when the server sent none.
+   */
+  const listMarker = useRef<RunsMarker | null>(null);
   /** The same guard for the scan line, which follows the project filter too. */
   const scanTicket = useRef(0);
   const countsTicket = useRef(0);
@@ -230,6 +245,9 @@ function App() {
   useEffect(() => {
     setItems(null);
     setSelectedId(null);
+    // It described those rows; a focus before the next list arrives reloads.
+    listMarker.current = null;
+    setNewerScan(null);
   }, [project, status, withZeros]);
 
   /**
@@ -256,11 +274,23 @@ function App() {
 
     void (async () => {
       try {
-        const rows = await requestJson<ListedFinding[]>(`/api/findings?${params}`);
+        const { body: rows, headers } = await requestJsonWithHeaders<ListedFinding[]>(
+          `/api/findings?${params}`,
+        );
         if (ticket !== listTicket.current) return;
+        const marker = parseMarker(headers.get("X-Runs-Marker"));
+        listMarker.current = marker;
         setItems(rows);
         setListError(null);
         setError(null);
+        // A read requested after the notice answers it, whatever the numbers —
+        // they go down when a backup is restored. One requested before can
+        // land after it, and clears it only if its rows include that scan.
+        setNewerScan((noticed) =>
+          noticed && ticket <= noticed.ticket && !(marker && covers(marker, noticed.marker))
+            ? noticed
+            : null,
+        );
         setSelectedId(
           (current) =>
             [current, ...wanted].find(
@@ -322,11 +352,41 @@ function App() {
       });
   }, [project, status, withZeros, revision]);
 
-  // A scan runs in a terminal beside this window, so returning to the tab is the
-  // moment the list is most likely to be stale. An unsaved note survives it.
+  /**
+   * A scan runs in a terminal beside this window, so returning to the tab is the
+   * moment the list is most likely to be stale. If a run has been recorded since
+   * the list loaded, the queue is not reordered under the operator mid-review:
+   * a banner offers the refresh instead. Otherwise the reload goes ahead, which
+   * picks up anything decided from the terminal. An unsaved note survives both.
+   * `newerScan` is the run record the list does not include, with the list
+   * request current when it was noticed; null when there is none.
+   */
+  const [newerScan, setNewerScan] = useState<{ marker: RunsMarker; ticket: number } | null>(null);
+  const scope = useRef(project);
+  scope.current = project;
   useEffect(() => {
-    window.addEventListener("focus", changed);
-    return () => window.removeEventListener("focus", changed);
+    async function onFocus() {
+      // Nothing to compare with: reload, and let that report any failure.
+      if (!listMarker.current) return changed();
+      // Any list request since this began makes its answer moot.
+      const ticket = listTicket.current;
+      const project = scope.current;
+      const params = project ? `?project=${encodeURIComponent(project)}` : "";
+      try {
+        const now = await requestJson<RunsMarker>(`/api/runs/marker${params}`);
+        if (ticket !== listTicket.current) return;
+        // Read now, not before the request: a load already in flight may have
+        // landed meanwhile with this very scan.
+        const shown = listMarker.current;
+        if (!shown || covers(shown, now)) changed();
+        else setNewerScan({ marker: now, ticket });
+      } catch {
+        if (ticket === listTicket.current) changed();
+      }
+    }
+    const listener = () => void onFocus();
+    window.addEventListener("focus", listener);
+    return () => window.removeEventListener("focus", listener);
   }, [changed]);
 
   const select = useCallback((id: number) => {
@@ -727,6 +787,14 @@ function App() {
             The profiles on disk do not load, so the inbox is using the last ones that did and
             drafting is off until they do: {profileError}
           </p>
+        )}
+        {newerScan && (
+          <div className="refresh-banner" role="status">
+            <span>A newer scan has been recorded since this list loaded.</span>
+            <button type="button" onClick={changed}>
+              Refresh
+            </button>
+          </div>
         )}
         {listError && <ListError error={listError} stale={items !== null} onRetry={changed} />}
         {error && <p className="error pad">{error}</p>}

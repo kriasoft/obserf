@@ -11,6 +11,7 @@ import {
   findingById,
   latestFindings,
   latestRunPerProject,
+  runsMarker,
   prepareDatabase,
   recentRuns,
   setTriage,
@@ -30,8 +31,8 @@ import { DraftRefused, generateDraft } from "../pipeline/draft";
 import { explain, rank } from "../pipeline/score";
 import index from "./index.html";
 
-function json(data: unknown, status = 200): Response {
-  return Response.json(data, { status });
+function json(data: unknown, status = 200, headers?: HeadersInit): Response {
+  return Response.json(data, { status, headers });
 }
 
 /**
@@ -248,6 +249,16 @@ export async function serve(port = 4000) {
        * nothing about the rest. A project with no run is absent; the inbox, which
        * knows which projects it shows, says so.
        */
+      /** The marker the list carries, alone: cheap enough to ask on every focus. */
+      "/api/runs/marker": local(async (req) => {
+        const url = new URL(req.url);
+        const shape = unexpectedParams(url, ["project"]);
+        if (shape) return shape;
+        const project = projectParam(url, (await profiles()).projects);
+        if (project instanceof Response) return project;
+        return json(runsMarker(project));
+      }),
+
       "/api/runs/latest": local(async (req) => {
         const url = new URL(req.url);
         const shape = unexpectedParams(url, ["project"]);
@@ -279,8 +290,14 @@ export async function serve(port = 4000) {
         const limit = intParam(url, "limit", 100, 1);
         if (limit instanceof Response) return limit;
 
+        // Read before the findings, so a scan committing in between leaves the
+        // marker older than the rows: at worst an unneeded refresh banner, never
+        // a missed one.
+        const marker = runsMarker(project);
         return json(
           rank(latestFindings({ project, status: status as TriageStatus[] }), { minScore, limit }),
+          200,
+          { "X-Runs-Marker": `${marker.lastRun}.${marker.finished}` },
         );
       }),
 

@@ -1185,3 +1185,17 @@ code {
   flex: none;
   font-size: 12px;
 }
+
+/* A scan landed mid-review: offered, not applied, so the queue holds still. */
+.refresh-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 8px 16px;
+  border-block: 1px solid var(--line);
+  background: var(--accent-bg);
+  font-size: 12.5px;
+}
+.refresh-banner span {
+  flex: 1;
+}

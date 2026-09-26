@@ -63,6 +63,14 @@ export const messageOf = (cause: unknown) =>
  * an error body as though it were a finding, then crashed rendering it.
  */
 export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestJsonWithHeaders<T>(path, init)).body;
+}
+
+/** `requestJson`, keeping the response headers for the one route that sends one. */
+export async function requestJsonWithHeaders<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ body: T; headers: Headers }> {
   const where = `${init?.method ?? "GET"} ${path}`;
   const response = await fetch(path, init);
   const text = await response.text();
@@ -81,7 +89,24 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
       (body as { error?: string } | null)?.error ?? `${where} failed (${response.status})`,
     );
   }
-  return body as T;
+  return { body: body as T, headers: response.headers };
+}
+
+/** The run record's position; see `runsMarker` in db/index.ts. */
+export interface RunsMarker {
+  lastRun: number;
+  finished: number;
+}
+
+/** Whether `a` has every run `b` has: none recorded that `a` lacks. */
+export function covers(a: RunsMarker, b: RunsMarker): boolean {
+  return a.lastRun >= b.lastRun && a.finished >= b.finished;
+}
+
+/** The list's `X-Runs-Marker` header; null when absent or malformed. */
+export function parseMarker(header: string | null): RunsMarker | null {
+  const match = header?.match(/^(\d+)\.(\d+)$/);
+  return match ? { lastRun: Number(match[1]), finished: Number(match[2]) } : null;
 }
 
 export const postJson = <T>(path: string, payload: unknown): Promise<T> =>
