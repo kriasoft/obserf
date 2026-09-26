@@ -48,7 +48,10 @@ sources/
   types.ts           Source and Candidate contracts
   shared.ts          nonBlank and sleep, the two every adapter needs
   index.ts           Registry
-  brave.ts hackernews.ts reddit.ts github.ts
+  brave.ts           Brave web search
+  hackernews.ts      Hacker News search via Algolia
+  reddit.ts          Reddit search within a profile's subreddits
+  github.ts          GitHub issue and repository search
 pipeline/
   scan.ts            Orchestrates discover → gate → enrich → assess → store
   gate.ts            Deterministic rejections
@@ -60,7 +63,8 @@ pipeline/
   draft.ts           Comment/reply/submission generation
 web/
   server.ts          Bun.serve with routes and HTML import
-  index.html app.tsx Review inbox
+  index.html         The inbox's page, which loads app.tsx
+  app.tsx            Review inbox (React)
 project.ts           The ProjectProfile contract, defineProject, venueRuleFor
 workspace.ts         Finding a workspace, its paths, loading its profiles
 init.ts              obserf init: the scaffold, and the placeholders it leaves
@@ -72,7 +76,7 @@ docs/                This documentation and docs/adr/
 
 Profiles and the database are not here. They live in an operator's workspace, which this repository never contains — see [ADR-010](adr/010-engine-and-workspace.md). `project.ts` and `workspace.ts` sit at the root rather than in a `projects/` directory, because a directory holding one file is what `config/`, `core/`, and `utils/` are deliberately absent for.
 
-`workspace.ts` resolves its paths synchronously and reads no config file, so `drizzle.config.ts` can import the database path at module scope without pulling the source adapters into drizzle-kit. Only `loadProjects` is async, and it imports the registry lazily for the same reason.
+`workspace.ts` resolves its paths synchronously and reads no config file, so `drizzle.config.ts` can import the database path at module scope without pulling the source adapters into drizzle-kit. Only the profile loaders are async, and they import the registry lazily for the same reason.
 
 `index.ts` is inert: nothing it reaches reads the environment, the working directory, or the disk. A workspace's `obserf.config.ts` imports it while Obserf is dynamically loading that very file, so the public entry must not be what decides where the workspace is. `workspace.ts` depends on `index.ts`; never the reverse.
 
