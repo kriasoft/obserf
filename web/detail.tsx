@@ -303,10 +303,12 @@ export function Detail({
                 last time is the first thing to see on coming back. The saved
                 note only; an edit shows here once it is saved. Clamped, so a long
                 one does not push the verdict away; the editor below holds it all. */}
-            {stored && (
+            {/* Trimmed: a CLI `--note` is stored verbatim, and leading blank
+                lines would fill the clamp and leave the panel looking empty. */}
+            {stored.trim() && (
               <p className="you-note">
                 <span className="chip you">YOU</span>
-                <span title={stored}>{stored}</span>
+                <span title={stored}>{stored.trim()}</span>
               </p>
             )}
           </header>

@@ -378,6 +378,8 @@ kbd {
 .draft-text {
   max-width: 68ch;
   white-space: pre-wrap;
+  /* A long URL breaks rather than being clipped while Copy takes all of it. */
+  overflow-wrap: anywhere;
   line-height: 1.6;
 }
 /* The first dozen lines, fading out, until opened. */
@@ -1233,6 +1235,8 @@ code {
   -webkit-line-clamp: 4;
   overflow: hidden;
   min-width: 0;
+  /* An appended "Posted: <url>" breaks rather than being clipped sideways. */
+  overflow-wrap: anywhere;
 }
 
 /* A failure that changes what every finding can do, under the header. */
