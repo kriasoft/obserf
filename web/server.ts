@@ -3,7 +3,7 @@
  * reader is the operator. See docs/adr/001-local-first-sqlite.md.
  */
 
-import { loadProjectsIfAny } from "../workspace";
+import { liveProfiles } from "../workspace";
 import { venueRuleFor, type ProjectProfile } from "../project";
 import {
   draftsFor,
@@ -198,7 +198,7 @@ export async function serve(port = 4000) {
   // than a 500 on whichever request happens to need them first. Having none is
   // not that failure — the inbox is where stored findings are read, and the last
   // profile being retired must not close the record it produced.
-  const projects = await loadProjectsIfAny();
+  const profiles = await liveProfiles();
   prepareDatabase();
 
   const server = Bun.serve({
@@ -226,9 +226,16 @@ export async function serve(port = 4000) {
     routes: {
       "/": index,
 
-      "/api/projects": local(() =>
-        json(projects.map((p) => ({ key: p.key, name: p.name, url: p.url }))),
-      ),
+      // `profileError` with the list, so the inbox can say on every screen —
+      // not only inside an open finding — that it is working from the last
+      // profiles that loaded rather than the ones on disk.
+      "/api/projects": local(async () => {
+        const { projects, profileError } = await profiles();
+        return json({
+          projects: projects.map((p) => ({ key: p.key, name: p.name, url: p.url })),
+          profileError,
+        });
+      }),
 
       /**
        * The latest scan: of the project when filtered, and of each project that
@@ -236,11 +243,11 @@ export async function serve(port = 4000) {
        * nothing about the rest. A project with no run is absent; the inbox, which
        * knows which projects it shows, says so.
        */
-      "/api/runs/latest": local((req) => {
+      "/api/runs/latest": local(async (req) => {
         const url = new URL(req.url);
         const shape = unexpectedParams(url, ["project"]);
         if (shape) return shape;
-        const project = projectParam(url, projects);
+        const project = projectParam(url, (await profiles()).projects);
         if (project instanceof Response) return project;
         return json(project ? recentRuns({ project, limit: 1 }) : latestRunPerProject());
       }),
@@ -250,7 +257,7 @@ export async function serve(port = 4000) {
        * send only valid values; a hand-typed or bookmarked URL used to get a
        * 200 with an empty list, indistinguishable from a quiet week.
        */
-      "/api/findings": local((req) => {
+      "/api/findings": local(async (req) => {
         const url = new URL(req.url);
         const shape = unexpectedParams(url, ["status", "project", "min", "limit"]);
         if (shape) return shape;
@@ -259,7 +266,7 @@ export async function serve(port = 4000) {
         const unknown = status.find((s) => !TRIAGE_STATUSES.includes(s as TriageStatus));
         if (unknown !== undefined) return json({ error: `Unknown status "${unknown}"` }, 400);
 
-        const project = projectParam(url, projects);
+        const project = projectParam(url, (await profiles()).projects);
         if (project instanceof Response) return project;
 
         const minScore = intParam(url, "min", 1, 0);
@@ -270,15 +277,15 @@ export async function serve(port = 4000) {
         return json(latestFindings({ project, status: status as TriageStatus[], minScore, limit }));
       }),
 
-      "/api/findings/:id": local((req) => {
+      "/api/findings/:id": local(async (req) => {
         const id = findingIdIn(req.params);
         if (id instanceof Response) return id;
         const view = findingById(id);
         if (!view) return json({ error: "Not found" }, 404);
-        // Use the startup profile for both the reminder and new drafts. Module
-        // imports are cached, so edited rules require a server restart.
+        // The profile as it is on disk now, or the last version that loaded.
         // Guidance belongs on the finding response so stored drafts show it too;
         // it does not record which rule was used when a draft was written.
+        const { projects, profileError } = await profiles();
         const project = projects.find((p) => p.key === view.finding.project);
         return json({
           ...view,
@@ -287,6 +294,8 @@ export async function serve(port = 4000) {
           // needs this to withhold drafting when the profile is gone.
           profileAvailable: project !== undefined,
           venueRule: project ? venueRuleFor(project, view.finding.venue) : null,
+          // Why drafting is off while the profiles fail to reload.
+          profileError,
         });
       }),
 
@@ -355,6 +364,10 @@ export async function serve(port = 4000) {
 
           // A missing profile is a workspace conflict (409); reserve 502 for
           // failures during draft generation.
+          const { projects, profileError } = await profiles();
+          if (profileError) {
+            return json({ error: `The profiles on disk do not load: ${profileError}` }, 409);
+          }
           const project = projects.find((p) => p.key === view.finding.project);
           if (!project) {
             return json(

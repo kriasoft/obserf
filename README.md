@@ -136,7 +136,7 @@ Use `dismissed` for findings you will not pursue. Scans keep your triage decisio
 
 ### Review inbox
 
-`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. It is unauthenticated and bound to the local machine. It reads the profiles at startup, so restart it after editing one.
+`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. It is unauthenticated and bound to the local machine. It picks up an edited profile when you return to it; if the edit does not load, it keeps the last version that did and turns drafting off until you fix it. A module the config or a profile imports is not reloaded, so restart it after editing one of those.
 
 | Key | What it does |
 | --- | --- |

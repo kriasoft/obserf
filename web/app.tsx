@@ -22,10 +22,12 @@ interface FindingView {
 type ListedFinding = FindingView & { drafts: number };
 type FindingDetail = FindingView & {
   drafts: Draft[];
-  /** Profile present at server startup; required for new drafts and venue guidance. */
+  /** Profile present in the workspace now; required for new drafts and venue guidance. */
   profileAvailable: boolean;
   /** Rule from that profile, shown with stored drafts too; not draft provenance. */
   venueRule: string | null;
+  /** Why the profiles on disk do not load; drafting is off until they do. */
+  profileError: string | null;
 };
 
 /**
@@ -116,6 +118,8 @@ function App() {
    */
   const [projects, setProjects] = useState<Array<{ key: string; name: string }> | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
+  /** The profiles on disk do not load; the server is using the last ones that did. */
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [project, setProject] = useState("");
   const [status, setStatus] = useState<TriageStatus>("new");
   /**
@@ -197,24 +201,32 @@ function App() {
     pane.current?.scrollTo(0, 0);
   }, [selectedId]);
 
+  // Reloaded on returning to the window, the usual way back from editing a
+  // profile, and after every write. The server rereads edited profiles on each
+  // request; fetched once, this list would not.
   useEffect(() => {
-    // StrictMode mounts twice; the discarded request must not overwrite the kept one.
+    // Reloads overlap, and StrictMode mounts twice: only the newest may answer.
     let current = true;
-    requestJson<Array<{ key: string; name: string }>>("/api/projects")
+    requestJson<{ projects: Array<{ key: string; name: string }>; profileError: string | null }>(
+      "/api/projects",
+    )
       .then((loaded) => {
         if (!current) return;
-        setProjects(loaded);
+        setProjects(loaded.projects);
+        setProfileError(loaded.profileError);
         setProjectsError(null);
       })
       .catch((cause: unknown) => {
         if (!current) return;
         setProjects(null);
+        // Unknown now, which is weaker than the failure last reported.
+        setProfileError(null);
         setProjectsError(messageOf(cause));
       });
     return () => {
       current = false;
     };
-  }, []);
+  }, [revision]);
 
   /**
    * Emptied the moment the filters change, and refilled only by the request
@@ -446,6 +458,17 @@ function App() {
                 {p.name}
               </option>
             ))}
+            {/* The control must always name the filter in force: a project retired
+                while selected still has findings to read, and a failed refresh
+                empties the list without changing what the findings are filtered by.
+                "No profile" only when the list loaded and lacks it, and not from the
+                last good profiles while the current ones fail to load. */}
+            {project && !projects?.some((p) => p.key === project) && (
+              <option value={project}>
+                {project}
+                {projects && !profileError ? " (no profile)" : ""}
+              </option>
+            )}
           </select>
           <select
             aria-label="Triage status"
@@ -500,6 +523,12 @@ function App() {
         {projectsError && (
           <p className="error pad">
             Could not read the profiles, so scan status is not shown — {projectsError}
+          </p>
+        )}
+        {profileError && (
+          <p className="warn pad">
+            The profiles on disk do not load, so the inbox is using the last ones that did and
+            drafting is off until they do: {profileError}
           </p>
         )}
         {error && <p className="error pad">{error}</p>}
@@ -617,7 +646,10 @@ function Detail({
   }, [load, revision]);
 
   if (!detail) return <p className={error ? "error" : "muted"}>{error ?? "Loading…"}</p>;
-  const { finding, assessment, drafts, status, venueRule, profileAvailable } = detail;
+  const { finding, assessment, drafts, status, venueRule, profileAvailable, profileError } = detail;
+  // A profile that failed to reload is still the last good one for reminders,
+  // but not for writing: the draft would come from the text the operator replaced.
+  const canDraft = profileAvailable && !profileError;
   // Null when the model named no opportunity — there is nothing to suggest,
   // and the buttons below offer every kind instead of promoting one.
   const suggestedKind = assessment?.opportunity
@@ -770,19 +802,24 @@ function Detail({
         {/* Withheld rather than disabled: without a profile the drafter has no
             pitch, voice or venue rule to write from, so the request can only
             come back a 409. Triage and the stored drafts below still work. */}
-        {profileAvailable && suggestedKind && (
+        {canDraft && suggestedKind && (
           <button onClick={() => void draft(suggestedKind)} disabled={drafting}>
             {drafting ? "Writing…" : `Write a ${suggestedKind}`}
           </button>
         )}
-        {profileAvailable &&
+        {canDraft &&
           DRAFT_KINDS.filter((k) => k !== suggestedKind).map((k) => (
             <button key={k} onClick={() => void draft(k)} disabled={drafting}>
               {suggestedKind ? `as ${k}` : `Write a ${k}`}
             </button>
           ))}
       </div>
-      {!profileAvailable && (
+      {profileError && (
+        <p className="warn small">
+          The profiles on disk do not load, so drafting is off until they do: {profileError}
+        </p>
+      )}
+      {!profileAvailable && !profileError && (
         <p className="warn small">
           No profile for "{finding.project}" any more. Restore it to write a draft; what is already
           here stays readable.
