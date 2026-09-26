@@ -348,15 +348,42 @@ kbd {
   margin: 16px 0;
   white-space: pre-wrap;
 }
+/* A card: what it is and when in the head, the text beneath. The body keeps
+   its line breaks; the head and captions do not. */
 .draft {
+  display: grid;
+  gap: 8px;
   border-color: var(--line-strong);
+  white-space: normal;
+}
+.draft p {
+  margin: 0;
 }
 .draft-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 8px;
+}
+.draft-head button {
+  margin-left: auto;
+}
+.draft-text {
+  max-width: 68ch;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+/* The first dozen lines, fading out, until opened. */
+.draft-text.collapsed {
+  max-height: 12lh;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, black 70%, transparent);
+}
+button.link {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
 }
 
 /* Pinned to the bottom of the scrolling pane; spans its padding edge to edge. */

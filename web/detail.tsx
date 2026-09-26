@@ -19,6 +19,13 @@ import { isShortcut } from "./keyboard";
 import { ActionBar } from "./action-bar";
 
 /**
+ * Characters past which a draft opens collapsed to its first dozen lines —
+ * about twice what those lines hold, so collapsing always hides something worth
+ * a click to open.
+ */
+const LONG_DRAFT = 1200;
+
+/**
  * The question each component answers, verbatim from docs/product/scoring.md.
  * Without them the tiles are four bare numbers, and the operator disagreeing
  * with a score cannot tell which judgment they are disagreeing with.
@@ -70,6 +77,8 @@ export function Detail({
   const [note, setNote] = useState<string | null>(() => pendingNotes.get(id) ?? null);
   const [drafting, setDrafting] = useState(false);
   const [copied, setCopied] = useState<number | null>(null);
+  /** Long drafts opened past their first lines. */
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
   /**
    * `W` writes the suggested draft and `c` copies the newest one — the last step
    * of a review, kept on the keyboard with the rest. `W` is Shift+W because a
@@ -393,21 +402,46 @@ export function Detail({
                     : `No verified guidance recorded for ${finding.venue}. Obserf cannot check whether a mention is permitted there or what taking part costs — read the venue's rules and what a submission actually requires before posting. A rule you verify yourself goes in the profile's venueGuidance, with its source and the date you checked.`}
               </p>
             )}
-            {drafts.map((d) => (
-              <div key={d.id} className="draft">
-                <div className="draft-head">
-                  <span className="muted small">
-                    {d.kind} · {new Date(d.createdAt).toLocaleString()} — review, edit, and post it
-                    yourself
-                  </span>
-                  <button onClick={() => void copy(d.id, d.body)}>
-                    {copied === d.id ? "Copied" : "Copy"} {d.id === latest?.id && <kbd>c</kbd>}
-                  </button>
-                </div>
-                <DraftContext draft={d} />
-                {d.body}
-              </div>
-            ))}
+            {drafts.map((d) => {
+              // Long enough to push the note and the next draft out of view.
+              const long = d.body.length > LONG_DRAFT;
+              const open = !long || expanded.has(d.id);
+              const words = d.body.trim().split(/\s+/).length;
+              return (
+                <article key={d.id} className="draft" aria-label={`${d.kind} draft`}>
+                  <header className="draft-head">
+                    <b>{d.kind}</b>
+                    <span className="muted">
+                      {new Date(d.createdAt).toLocaleString()} · {words} words
+                    </span>
+                    <button onClick={() => void copy(d.id, d.body)}>
+                      {copied === d.id ? "Copied" : "Copy"} {d.id === latest?.id && <kbd>c</kbd>}
+                    </button>
+                  </header>
+                  {/* Never "ready to post": a draft is unread text until the
+                      operator has read it. */}
+                  <p className="muted small">Review, edit, and post it yourself.</p>
+                  <DraftContext draft={d} />
+                  <div className={open ? "draft-text" : "draft-text collapsed"}>{d.body}</div>
+                  {long && (
+                    <button
+                      className="link"
+                      aria-expanded={open}
+                      onClick={() =>
+                        setExpanded((current) => {
+                          const next = new Set(current);
+                          if (open) next.delete(d.id);
+                          else next.add(d.id);
+                          return next;
+                        })
+                      }
+                    >
+                      {open ? "Show less" : "Read full draft"}
+                    </button>
+                  )}
+                </article>
+              );
+            })}
             {drafts.length === 0 && <p className="muted small">No drafts yet.</p>}
           </section>
 
