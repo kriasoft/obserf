@@ -243,12 +243,6 @@ export async function serve(port = 4000) {
         });
       }),
 
-      /**
-       * The latest scan: of the project when filtered, and of each project that
-       * has one when not, since the newest run across a mixed list establishes
-       * nothing about the rest. A project with no run is absent; the inbox, which
-       * knows which projects it shows, says so.
-       */
       /** The marker the list carries, alone: cheap enough to ask on every focus. */
       "/api/runs/marker": local(async (req) => {
         const url = new URL(req.url);
@@ -259,6 +253,12 @@ export async function serve(port = 4000) {
         return json(runsMarker(project));
       }),
 
+      /**
+       * The latest scan: of the project when filtered, and of each project that
+       * has one when not, since the newest run across a mixed list establishes
+       * nothing about the rest. A project with no run is absent; the inbox, which
+       * knows which projects it shows, says so.
+       */
       "/api/runs/latest": local(async (req) => {
         const url = new URL(req.url);
         const shape = unexpectedParams(url, ["project"]);
