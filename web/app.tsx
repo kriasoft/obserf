@@ -743,7 +743,9 @@ function App() {
         ))}
 
         {!listError && !items && <p className="muted pad">Loading…</p>}
-        {items?.length === 0 && (
+        {/* Not beside a failed read: its explanation is about the queue now,
+            and an empty list from the last read that worked says nothing of it. */}
+        {items?.length === 0 && !listError && (
           <EmptyList
             status={status}
             projectName={
@@ -872,11 +874,15 @@ function EmptyList({
           </button>
         )}
         {/* Only where the pill, and so the report, exists. */}
-        {scanned && scans && ("summary" in scans ? scans.summary : scans.report) && (
-          <button type="button" popoverTarget={SCAN_REPORT_ID}>
-            View scan
-          </button>
-        )}
+        {scanned &&
+          scans &&
+          ("summary" in scans ? scans.summary : scans.report) && (
+            // "show": as an invoker it is exempt from light dismiss, so a toggle
+            // would close a report the pill already opened.
+            <button type="button" popoverTarget={SCAN_REPORT_ID} popoverTargetAction="show">
+              View scan
+            </button>
+          )}
       </div>
     </div>
   );
