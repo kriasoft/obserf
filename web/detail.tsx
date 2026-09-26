@@ -299,6 +299,16 @@ export function Detail({
                 <span>one comment inside a thread, not the thread itself</span>
               )}
             </p>
+            {/* The operator's own reading, above the model's: what they decided
+                last time is the first thing to see on coming back. The saved
+                note only; an edit shows here once it is saved. Clamped, so a long
+                one does not push the verdict away; the editor below holds it all. */}
+            {stored && (
+              <p className="you-note">
+                <span className="chip you">YOU</span>
+                <span title={stored}>{stored}</span>
+              </p>
+            )}
           </header>
 
           {status === "dismissed" && (

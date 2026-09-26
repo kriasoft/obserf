@@ -1201,3 +1201,30 @@ code {
 .refresh-banner span {
   flex: 1;
 }
+
+/* The saved note under the title, on the note's own warm panel. */
+.finding-head .you-note {
+  display: flex;
+  /* The header's paragraphs wrap their items; this one's text wraps inside. */
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 7px 10px;
+  border: 1px solid var(--you-line);
+  border-radius: 6px;
+  background: var(--you-bg);
+  color: var(--text);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+.finding-head .you-note .chip {
+  flex: none;
+}
+.finding-head .you-note > :last-child {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  min-width: 0;
+}
