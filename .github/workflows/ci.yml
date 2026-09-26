@@ -16,6 +16,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # release.yml runs these checks against the tagged commit before it publishes.
+  workflow_call:
 
 permissions:
   contents: read

@@ -44,7 +44,7 @@ const LOOPBACK = new Set(["127.0.0.1", "localhost"]);
 
 /**
  * Whether the request names this machine in `Host`: the DNS-rebinding defense
- * (SECURITY.md). A rebound page's `Host` still names the attacker's domain,
+ * (.github/SECURITY.md). A rebound page's `Host` still names the attacker's domain,
  * and its GET reads carry no `Origin`, so `crossOrigin` alone cannot protect
  * them. The whole authority is matched, so `localhost:junk` and
  * `localhost@elsewhere` are refused rather than read as their prefix.

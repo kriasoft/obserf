@@ -38,7 +38,7 @@ There is no build step, so there is no `src/` — Bun runs the TypeScript at the
 - `index.ts` – the package entry, and the whole public API: `defineProject` and `defineConfig`. Adding an export here is a commitment; the pipeline, gate, weights and registry are deliberately absent. Nothing it reaches may read the environment or the disk — a workspace's config file imports it _while Obserf is loading that file_
 - `drizzle/` – generated migrations, committed and shipped with the package. `meta/` is drizzle-kit's state for generating the next one and stays out of the published files
 - `docs/` – product docs and `docs/adr/` for architecture decision records
-- `.github/workflows/ci.yml` – the only CI; `SECURITY.md` states what counts as a vulnerability here, which is narrower than it looks because a bad draft is a quality problem
+- `.github/workflows/ci.yml` – the only CI; `release.yml` reruns it on a `v*` tag, then stages the package on npm through trusted publishing for a maintainer to approve with 2FA. `.github/SECURITY.md` states what counts as a vulnerability here, which is narrower than it looks because a bad draft is a quality problem
 
 No `config/`, `core/`, `utils/`, or `scripts/` directories: each would wrap a single file or nothing. Add one only when a second real file needs it.
 

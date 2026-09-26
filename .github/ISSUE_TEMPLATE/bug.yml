@@ -1,0 +1,30 @@
+name: Bug
+description: Obserf failed, crashed, or did something its docs say it does not do.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are public. Leave out your profiles, credentials, database contents and anything else from your workspace that you would not publish; a minimal example profile reproduces most bugs.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran and what it printed. Paste output rather than a screenshot.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`bun --version` and the installed `@obserf/cli` version"
+      placeholder: bun 1.4.2, @obserf/cli 0.2.0
+    validations:
+      required: true

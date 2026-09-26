@@ -224,7 +224,7 @@ Credentials are covered in [Sources](#sources). Everything else has a working de
 | `OBSERF_MAX_AGE_DAYS` | `365` | The `stale` gate's cutoff |
 | `OBSERF_REASSESS_AFTER_DAYS` | `7` | How long a finding waits before it may be reassessed |
 | `OBSERF_REASSESS_DISQUALIFIED_AFTER_DAYS` | `30` | The same for one the model disqualified |
-| `OBSERF_USER_AGENT` | `obserf/0.1 (+https://obserf.com)` | What Reddit and GitHub are told; both refuse requests without one |
+| `OBSERF_USER_AGENT` | `obserf/0.2 (+https://obserf.com)` | What Reddit and GitHub are told; both refuse requests without one |
 | `NO_COLOR` | unset | Any non-empty value turns colour off |
 
 The thresholds no variable reaches, such as the gate's minimum text length and the blocked domains, are in [config.ts](config.ts).
@@ -256,7 +256,7 @@ In a checkout: `bun install`, then `bun test`, `bun run typecheck` and `bun run 
 - [What counts as an opportunity](docs/product/opportunities.md) — eligibility and draft standards
 - [Scoring](docs/product/scoring.md) · [Sources](docs/product/sources.md) · [Evaluation](docs/product/evaluation.md) · [Roadmap](docs/product/roadmap.md)
 - [Architecture](docs/architecture.md) and [ADRs](docs/adr/)
-- [Security](SECURITY.md) — what to report privately, and what is a quality problem rather than a vulnerability
+- [Security](.github/SECURITY.md) — what to report privately, and what is a quality problem rather than a vulnerability
 
 ## License
 
