@@ -1,13 +1,26 @@
+/* One palette, both schemes: `light-dark()` picks by `color-scheme`, which
+   follows the OS unless the theme toggle pins it through `data-theme`. */
 :root {
-  --bg: #0f1115;
-  --panel: #161922;
-  --line: #262b38;
-  --text: #e4e7ee;
-  --muted: #8b93a7;
-  --accent: #6ea8fe;
-  --good: #4ade80;
-  --mid: #fbbf24;
-  --bad: #f87171;
+  color-scheme: light dark;
+  --bg: light-dark(#ffffff, #09090b);
+  --panel: light-dark(#fafafa, #121215);
+  --control: light-dark(#f4f4f5, #1b1b1f);
+  --hover: light-dark(#f4f4f6, #16161a);
+  --selected: light-dark(#ececef, #1f1f25);
+  --line: light-dark(#e7e7ea, #232328);
+  --line-strong: light-dark(#d9d9de, #303036);
+  --text: light-dark(#09090b, #f4f4f5);
+  --muted: light-dark(#64646e, #8c8c96);
+  --accent: light-dark(oklch(0.52 0.14 250), oklch(0.74 0.12 250));
+  --accent-bg: light-dark(oklch(0.52 0.14 250 / 0.09), oklch(0.74 0.12 250 / 0.12));
+  --good: light-dark(oklch(0.48 0.13 155), oklch(0.76 0.15 155));
+  --mid: light-dark(oklch(0.5 0.12 70), oklch(0.8 0.14 78));
+  --bad: light-dark(oklch(0.55 0.19 25), oklch(0.7 0.17 25));
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
   color-scheme: dark;
 }
 
@@ -24,6 +37,7 @@ body {
     -apple-system,
     "Segoe UI",
     sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 .layout {
@@ -71,7 +85,7 @@ button,
 textarea {
   font: inherit;
   color: var(--text);
-  background: #1e2230;
+  background: var(--control);
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 5px 10px;
@@ -79,6 +93,28 @@ textarea {
 }
 button:hover:not(:disabled) {
   border-color: var(--accent);
+}
+/* An icon-only control; its name is its aria-label. */
+button.icon {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+}
+button.icon:hover {
+  color: var(--text);
+}
+button.icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 button:disabled {
   opacity: 0.5;
@@ -103,11 +139,11 @@ button:disabled {
   border-radius: 0;
 }
 .item:hover {
-  background: #1a1e29;
+  background: var(--hover);
   border-color: var(--line);
 }
 .item[aria-current="true"] {
-  background: #1e2434;
+  background: var(--selected);
 }
 .item .title {
   display: block;
@@ -173,7 +209,7 @@ kbd {
   padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: 4px;
-  background: #0c0e13;
+  background: var(--control);
   font:
     11px ui-monospace,
     monospace;
@@ -202,7 +238,7 @@ kbd {
   white-space: pre-wrap;
 }
 .draft {
-  border-color: #2f3a52;
+  border-color: var(--line-strong);
 }
 .draft-head {
   display: flex;
@@ -278,8 +314,9 @@ h1 {
   border-radius: 3px;
   font-size: 11px;
   font-weight: normal;
-  color: #8fd3e8;
-  border: 1px solid #2c5663;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-bg);
 }
 
 .undo {
@@ -289,7 +326,7 @@ h1 {
   gap: 10px;
   padding: 7px 16px;
   border-bottom: 1px solid var(--line);
-  background: #171b26;
+  background: var(--panel);
 }
 .undo > span {
   flex: 1;
