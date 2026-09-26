@@ -33,7 +33,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: The tag names the version being staged
         run: |
@@ -44,7 +44,7 @@ jobs:
           fi
 
       # `npm stage publish` and OIDC need a newer npm than the runner ships.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: npm install -g npm@12
