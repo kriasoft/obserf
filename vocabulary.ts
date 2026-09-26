@@ -10,6 +10,44 @@
 export const TRIAGE_STATUSES = ["new", "shortlisted", "dismissed", "acted"] as const;
 export type TriageStatus = (typeof TRIAGE_STATUSES)[number];
 
+/**
+ * Where a draft's view of the thread came from. `excerpt` is what the scan
+ * stored, which for a search result can be a 300-character description of a
+ * forty-reply thread. Stored in `drafts.context_source`, so a rename needs a
+ * migration; `draftContextNote` owns the wording.
+ */
+export type DraftContextSource = "hn-algolia" | "github-api" | "page" | "excerpt";
+
+const FETCHED_VIA: Record<Exclude<DraftContextSource, "excerpt">, string> = {
+  "hn-algolia": "Hacker News via Algolia",
+  "github-api": "the GitHub API",
+  page: "the page itself",
+};
+
+/**
+ * The line both front ends print with a draft. `complete` only for a whole read
+ * at draft time: a draft from before this was recorded is unknown, not fine.
+ */
+export function draftContextNote(
+  source: DraftContextSource | null,
+  warning: string | null,
+): { text: string; complete: boolean } {
+  if (source === null) {
+    return {
+      text: "context source not recorded — draft predates provenance tracking",
+      complete: false,
+    };
+  }
+  const base =
+    source === "excerpt"
+      ? "written from the stored excerpt only"
+      : `written from content fetched at draft time (${FETCHED_VIA[source]})`;
+  return {
+    text: warning ? `${base} — ${warning}` : base,
+    complete: source !== "excerpt" && !warning,
+  };
+}
+
 export const OPPORTUNITY_TYPES = [
   "question",
   "discussion",

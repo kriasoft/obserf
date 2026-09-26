@@ -120,7 +120,7 @@ bun run obserf triage 42 shortlisted
 bun run obserf draft 42
 ```
 
-Drafting fetches the thread's current text first: Hacker News items and GitHub issues, pull requests and repositories (by their README) through their APIs, and any other page, a GitHub discussion included, as plain text. It reports anything it had to leave out, and falls back to the stored excerpt when it cannot read the thread at all. The draft's kind follows the opportunity type, and a finding that is one comment inside a thread gets a reply. Override it with `--kind comment|reply|submission`.
+Drafting fetches the thread's current text first: Hacker News items and GitHub issues, pull requests and repositories (by their README) through their APIs, and any other page, a GitHub discussion included, as plain text. When it cannot read the thread it falls back to the stored excerpt; either way it reports anything it left out, and `obserf show` and the inbox print that with the draft. It writes nothing when the fetch shows the thread is gone or locked: a Hacker News item deleted or killed, or a comment under a killed story; a GitHub issue or pull request deleted, locked or answering 404, or a repository answering 404. A closed but unlocked GitHub issue still takes comments, so it is drafted. The draft's kind follows the opportunity type, and a finding that is one comment inside a thread gets a reply. Override it with `--kind comment|reply|submission`.
 
 <!-- prettier-ignore -->
 > [!IMPORTANT]

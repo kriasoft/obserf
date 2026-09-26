@@ -39,7 +39,7 @@ The gate enforces the boundary: a finding the operator has `dismissed` or `acted
 ## Impact
 
 - Positive: obserf behaves like a monitor rather than a one-shot finder; re-assessment is safe; prompt versions stay comparable; human decisions survive every pipeline change.
-- Negative/Risks: earlier snapshots are lost on refresh. Assessment history preserves the judgments and the prompt provenance behind them, but not the candidate text or raw payload each assessment actually saw, so a past verdict cannot be replayed against its exact input. Draft history likewise preserves generated copy, not the operator's edits or any proof of posting.
+- Negative/Risks: earlier snapshots are lost on refresh. Assessment history preserves the judgments and the prompt provenance behind them, but not the candidate text or raw payload each assessment actually saw, so a past verdict cannot be replayed against its exact input. Draft history likewise preserves generated copy and which context it was written from, not the text of that context, the operator's edits, or any proof of posting.
 - Reads need a join and a "latest assessment" predicate, contained in `latestFindings()` rather than spread across callers.
 
 ## Links

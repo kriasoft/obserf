@@ -22,7 +22,7 @@ import {
   type DraftKind,
   type TriageStatus,
 } from "../vocabulary";
-import { generateDraft } from "../pipeline/draft";
+import { DraftRefused, generateDraft } from "../pipeline/draft";
 import index from "./index.html";
 
 function json(data: unknown, status = 200): Response {
@@ -385,6 +385,8 @@ export async function serve(port = 4000) {
             );
             return json(result);
           } catch (error) {
+            // Nothing failed: the fetch established a fact that rules the draft out.
+            if (error instanceof DraftRefused) return json({ error: error.message }, 409);
             // Surfaced in the UI rather than swallowed: a model failure and an
             // empty draft look identical otherwise.
             return json({ error: error instanceof Error ? error.message : String(error) }, 502);

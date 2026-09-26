@@ -9,7 +9,13 @@ import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-or
 // Shared with the browser, so it lives outside this module — see vocabulary.ts.
 // Not re-exported: the tables are this module's to own, the vocabulary is not,
 // and a second import route would make `db/schema.ts` look like its home.
-import type { DraftKind, OpportunityType, TriageStatus, SourceId } from "../vocabulary";
+import type {
+  DraftContextSource,
+  DraftKind,
+  OpportunityType,
+  TriageStatus,
+  SourceId,
+} from "../vocabulary";
 import type { RepositoryFacts } from "../sources/types";
 
 /** One scan. Holds the counts and token spend that make a run answerable later. */
@@ -164,6 +170,10 @@ export const drafts = sqliteTable(
     kind: text("kind").$type<DraftKind>().notNull(),
     body: text("body").notNull(),
     model: text("model").notNull(),
+    /** Null for a draft written before this was recorded. */
+    contextSource: text("context_source").$type<DraftContextSource>(),
+    /** What limited that context, or why there was none. */
+    contextWarning: text("context_warning"),
     createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   },
   (t) => [index("drafts_finding").on(t.findingId, t.createdAt)],

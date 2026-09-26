@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OPPORTUNITY_TYPES, defaultKindFor } from "../vocabulary";
+import { OPPORTUNITY_TYPES, defaultKindFor, draftContextNote } from "../vocabulary";
 
 describe("defaultKindFor", () => {
   test("a curated list takes a submission, not a comment", () => {
@@ -41,5 +41,32 @@ describe("defaultKindFor, for a comment inside a thread", () => {
     expect(defaultKindFor("discussion", null)).toBe("comment");
     expect(defaultKindFor("discussion", undefined)).toBe("comment");
     expect(defaultKindFor("discussion", false)).toBe("comment");
+  });
+});
+
+/**
+ * A draft from a 300-character search description must never read like one
+ * written from the whole thread, and one from before provenance was recorded is
+ * unknown rather than fine.
+ */
+describe("draftContextNote", () => {
+  test("only a whole live read is complete", () => {
+    expect(draftContextNote("hn-algolia", null)).toEqual({
+      text: "written from content fetched at draft time (Hacker News via Algolia)",
+      complete: true,
+    });
+    expect(draftContextNote("page", "12 replies not fetched").complete).toBe(false);
+  });
+
+  test("the excerpt says so, with why", () => {
+    expect(draftContextNote("excerpt", "GitHub returned 404")).toEqual({
+      text: "written from the stored excerpt only — GitHub returned 404",
+      complete: false,
+    });
+  });
+
+  test("an unrecorded source is not presented as fine", () => {
+    expect(draftContextNote(null, null)).toMatchObject({ complete: false });
+    expect(draftContextNote(null, null).text).toContain("not recorded");
   });
 });

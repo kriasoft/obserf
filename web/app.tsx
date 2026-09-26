@@ -1,12 +1,12 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Assessment, Draft, Finding, Run } from "../db/schema";
-import type { DraftResult } from "../pipeline/draft";
 import {
   DRAFT_KINDS,
   EVERGREEN,
   TRIAGE_STATUSES,
   defaultKindFor,
+  draftContextNote,
   type DraftKind,
   type OpportunityType,
   type TriageStatus,
@@ -612,11 +612,6 @@ function Detail({
    */
   const [note, setNote] = useState<string | null>(() => pendingNotes.get(id) ?? null);
   const [drafting, setDrafting] = useState(false);
-  /**
-   * Context used for the latest draft generated in this mounted detail pane.
-   * Matched by draft id; lost on switching findings or reloading the page.
-   */
-  const [provenance, setProvenance] = useState<DraftResult | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   /**
@@ -701,8 +696,7 @@ function Detail({
       // Always explicit. The server would otherwise re-derive the kind from the
       // assessment as it stands now, which a scan can have changed since this
       // pane loaded — and the button would have promised the wrong thing.
-      const result = await postJson<DraftResult>(`/api/findings/${id}/draft`, { kind });
-      setProvenance(result);
+      await postJson<Draft>(`/api/findings/${id}/draft`, { kind });
       // Through the parent rather than `load()`: the list row shows a draft
       // count, and it would otherwise stay wrong until something else reloaded —
       // including when the model finishes after the operator has moved on.
@@ -871,20 +865,7 @@ function Detail({
               {copied === d.id ? "Copied" : "Copy"}
             </button>
           </div>
-          {/* Another client may have generated a newer draft before this reload;
-              retrieval context belongs to the returned id, not list position. */}
-          {provenance?.id === d.id && (
-            <p
-              className={
-                provenance.contextVia && !provenance.contextWarning ? "muted small" : "warn small"
-              }
-            >
-              {(provenance.contextVia
-                ? `written from content fetched live (${provenance.contextVia})`
-                : "written from the stored excerpt only") +
-                (provenance.contextWarning ? ` — ${provenance.contextWarning}` : "")}
-            </p>
-          )}
+          <DraftContext draft={d} />
           {d.body}
         </div>
       ))}
@@ -1114,3 +1095,9 @@ root.render(
     <App />
   </StrictMode>,
 );
+
+/** What a draft was written against, shown with stored drafts too. */
+function DraftContext({ draft }: { draft: Draft }) {
+  const { text, complete } = draftContextNote(draft.contextSource, draft.contextWarning);
+  return <p className={complete ? "muted small" : "warn small"}>{text}</p>;
+}

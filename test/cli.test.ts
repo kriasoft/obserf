@@ -292,6 +292,8 @@ describe("a finding read back", () => {
     expect(output).toContain("first seen");
     expect(output).toContain("in scan #2 · triage updated");
     expect(output).toContain("model-b · prompt fp-new");
+    // Seeded without provenance, as every draft written before it was stored.
+    expect(output).toContain("context source not recorded");
     const earlier = output.slice(output.indexOf("Earlier assessments"));
     // No score: `rescore` would have rewritten it. The flag leads, since none of
     // the components shows it.

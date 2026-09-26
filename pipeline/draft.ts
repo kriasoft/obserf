@@ -4,10 +4,10 @@
  */
 
 import { ask, emptyUsage } from "../agent";
-import { fetchContext, type FreshContext } from "./draft-context";
+import { fetchContext } from "./draft-context";
 import { config } from "../config";
 import { db, schema } from "../db";
-import type { Finding } from "../db/schema";
+import type { Draft, Finding } from "../db/schema";
 import type { DraftKind } from "../vocabulary";
 import { venueRuleFor, type ProjectProfile } from "../project";
 
@@ -55,34 +55,32 @@ function kindGuidance(kind: DraftKind): string {
 }
 
 /**
- * `contextVia` is how fresh context was retrieved, `null` when the stored
- * excerpt was all there was. `contextWarning` is what limits that context, or
- * why there is none — required then, and present alongside a non-null
- * `contextVia` too, so a caller reporting provenance has to report it.
+ * The draft-time fetch established a fact that rules a draft out. Its own class
+ * so a front end can answer it as a refusal rather than as a failure to draft.
  */
-export type DraftResult = {
-  /** The stored draft this wrote. Provenance is not stored, so a caller that
-   * wants to show it has to be able to say which draft it describes. */
-  id: number;
-  body: string;
-} & (
-  | { contextVia: FreshContext["via"]; contextWarning?: string }
-  | { contextVia: null; contextWarning: string }
-);
+export class DraftRefused extends Error {
+  constructor(reason: string) {
+    super(`Not drafting: ${reason}.`);
+    this.name = "DraftRefused";
+  }
+}
 
 export async function generateDraft(
   project: ProjectProfile,
   finding: Finding,
   kind: DraftKind,
   reason?: string,
-): Promise<DraftResult> {
+): Promise<Draft> {
   // `ask` accumulates into this; the draft's spend is not reported anywhere, so
   // it does not leave the function.
   const usage = emptyUsage();
 
   // Fetch current source context; the evidence used to rank it may be partial
   // or stale by the time the operator asks for a draft.
-  const retrieved = await fetchContext(finding);
+  const retrieved = await fetchContext(finding.url);
+  // Before the model call: polished copy for a thread the fetch ruled out spends
+  // quota on text that can only mislead.
+  if ("refused" in retrieved) throw new DraftRefused(retrieved.refused);
   const { context: fresh, warning: contextWarning } = retrieved;
 
   const context = [
@@ -145,14 +143,18 @@ export async function generateDraft(
     usage,
   );
 
-  const [stored] = db
+  // Stored, not only returned: a draft is re-read before posting, often days later.
+  return db
     .insert(schema.drafts)
-    .values({ findingId: finding.id, kind, body, model: config.model, createdAt: new Date() })
-    .returning({ id: schema.drafts.id })
-    .all();
-
-  const draft = { id: stored!.id, body };
-  return retrieved.context
-    ? { ...draft, contextVia: retrieved.context.via, contextWarning: retrieved.warning }
-    : { ...draft, contextVia: null, contextWarning: retrieved.warning };
+    .values({
+      findingId: finding.id,
+      kind,
+      body,
+      model: config.model,
+      contextSource: fresh?.via ?? "excerpt",
+      contextWarning: contextWarning ?? null,
+      createdAt: new Date(),
+    })
+    .returning()
+    .get();
 }

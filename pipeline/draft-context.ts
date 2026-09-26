@@ -13,35 +13,42 @@
 import { config } from "../config";
 import { decodeEntities, truncate } from "../html";
 import { githubHeaders } from "../sources/github";
-import type { Finding } from "../db/schema";
+import type { DraftContextSource } from "../vocabulary";
 
 /** Upper bound on fresh source context. */
 const MAX_CHARS = 8000;
 const TIMEOUT_MS = 15_000;
 
-export interface FreshContext {
+interface FreshContext {
   text: string;
   /** How it was retrieved, for the operator to judge how much to trust it. */
-  via: "hn-api" | "github-api" | "page";
+  via: Exclude<DraftContextSource, "excerpt">;
 }
 
 /**
  * `warning` says what limits the context, or why there is none — required then,
  * since a draft from the stored excerpt must say why.
  */
-export type ContextResult =
+type ContextResult =
   | { context: FreshContext; warning?: string }
   | { context: null; warning: string };
 
-export async function fetchContext(finding: Finding): Promise<ContextResult> {
+/**
+ * `refused` is a fact the fetch established that rules a draft out: deleted,
+ * dead, locked, or a GitHub 404. Never an inference — a timeout, or a closed
+ * but unlocked issue, stays a warning.
+ */
+type Retrieval = ContextResult | { refused: string };
+
+export async function fetchContext(url: string): Promise<Retrieval> {
   try {
-    const hnId = hackerNewsId(finding.url);
+    const hnId = hackerNewsId(url);
     if (hnId) return await fetchHackerNews(hnId);
 
-    const target = githubTarget(finding.url);
+    const target = githubTarget(url);
     if (target) return await fetchGithub(target);
 
-    return await fetchPage(finding.url);
+    return await fetchPage(url);
   } catch (error) {
     return { context: null, warning: error instanceof Error ? error.message : String(error) };
   }
@@ -77,6 +84,8 @@ interface AlgoliaItem {
   url?: string | null;
   /** The item's kind; `"comment"` is the only one read differently here. */
   type?: string;
+  /** The submission a comment belongs to. */
+  story_id?: number | null;
   children?: AlgoliaItem[];
 }
 
@@ -84,16 +93,59 @@ interface AlgoliaItem {
  * Hacker News through Algolia's item endpoint: the full thread as structured
  * data, which beats scraping the same page as HTML.
  */
-async function fetchHackerNews(id: string): Promise<ContextResult> {
-  const response = await fetch(`https://hn.algolia.com/api/v1/items/${id}`, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+async function fetchHackerNews(id: string): Promise<Retrieval> {
+  // Settled, not awaited raw: a failed thread fetch must not discard a refusal
+  // the status check established.
+  const [response, item] = await Promise.all([
+    fetch(`https://hn.algolia.com/api/v1/items/${id}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    }).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error)))),
+    hackerNewsStatus(id),
+  ]);
+  if (item?.deleted) return { refused: "the Hacker News item was deleted" };
+  if (item?.dead) return { refused: "the Hacker News item is dead" };
+  if (response instanceof Error) throw response;
   if (!response.ok) {
     return { context: null, warning: `Hacker News item ${id} returned ${response.status}` };
   }
+  const thread = (await response.json()) as AlgoliaItem;
 
-  return hackerNewsContext((await response.json()) as AlgoliaItem);
+  let checked = item !== null;
+  if (thread.type === "comment") {
+    // A killed submission's thread takes no new comments, so neither does a
+    // live comment in it. Only killed: that deletion closes it too is not
+    // established. The thread fetch is what names the story, hence sequential.
+    const storyId = thread.story_id ? String(thread.story_id) : null;
+    const story = storyId && storyId !== id ? await hackerNewsStatus(storyId) : null;
+    if (story?.dead) return { refused: "the Hacker News story it belongs to is dead" };
+    checked &&= story !== null;
+  }
+
+  const read = hackerNewsContext(thread);
+  if (checked) return read;
+  // Drafted, since a failed check proves nothing, but not presented as checked.
+  const unchecked = "could not check whether Hacker News reports the thread dead or deleted";
+  return { ...read, warning: read.warning ? `${read.warning}; ${unchecked}` : unchecked };
+}
+
+/**
+ * Hacker News's own dead and deleted flags, which Algolia's index lacks. `null`
+ * when the official API gave no answer about this item: unknown, not open.
+ */
+async function hackerNewsStatus(id: string): Promise<{ dead: boolean; deleted: boolean } | null> {
+  try {
+    const response = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, {
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    const item = (await response.json()) as { id?: unknown; dead?: unknown; deleted?: unknown };
+    // A missing item is `null`; a body that names another item is no answer either.
+    if (item?.id !== Number(id)) return null;
+    return { dead: item.dead === true, deleted: item.deleted === true };
+  } catch {
+    return null;
+  }
 }
 
 /** An Algolia item as context, separate from the request so it can be tested. */
@@ -144,7 +196,7 @@ export function hackerNewsContext(item: AlgoliaItem): ContextResult {
   ].filter(Boolean);
 
   return {
-    context: { text, via: "hn-api" },
+    context: { text, via: "hn-algolia" },
     warning: missing.join("; ") || undefined,
   };
 }
@@ -215,6 +267,8 @@ interface GitHubIssue {
   title?: string;
   body?: string | null;
   state?: string;
+  /** Only collaborators can comment on a locked issue. */
+  locked?: boolean;
   comments?: number;
   user?: { login?: string } | null;
   /**
@@ -231,18 +285,40 @@ interface GitHubComment {
 }
 
 /**
- * GitHub's REST API rather than its HTML. Failures fall back to the stored
- * excerpt with a warning, as every other path here does — never to the page
- * fetch, which for these URLs is the bad context this exists to replace.
+ * A GitHub 404, which is deliberately ambiguous: not proof that the operator
+ * cannot see the resource, only that Obserf has nothing current to draft from.
  */
-async function fetchGithub(target: GitHubTarget): Promise<ContextResult> {
+function unreadable(name: string): string {
+  return `GitHub returns 404 for ${name}: deleted, private, transferred, or hidden from the access Obserf has`;
+}
+
+/**
+ * GitHub's REST API rather than its HTML. A failure that is not a refusal falls
+ * back to the stored excerpt with a warning — never to the page fetch, which
+ * for these URLs is the bad context this exists to replace.
+ */
+async function fetchGithub(target: GitHubTarget): Promise<Retrieval> {
   if (target.kind === "repo") return fetchReadme(target.repo);
 
   const path = `repos/${target.repo}/issues/${target.number}`;
   const issue = await githubJson(path);
+  // 410 is deleted. A 404 is ambiguous, but either way Obserf has nothing current
+  // to draft from, and a draft from the excerpt would answer a thread it cannot
+  // show exists. Repositories differ: see `fetchReadme`.
+  if ("failure" in issue && issue.status === 410) {
+    return { refused: `${target.repo}#${target.number} was deleted` };
+  }
+  if ("failure" in issue && issue.status === 404) {
+    return { refused: unreadable(`${target.repo}#${target.number}`) };
+  }
   if ("failure" in issue) return { context: null, warning: issue.failure };
   if (Array.isArray(issue.value)) return { context: null, warning: unexpectedGithubBody(path) };
   const found: GitHubIssue = issue.value;
+  // Closed is not locked: a closed issue still takes comments. Refused on the
+  // lock alone; Obserf cannot tell whether the operator is a collaborator.
+  if (found.locked === true) {
+    return { refused: `${target.repo}#${target.number} is locked to collaborators` };
+  }
 
   // The issue already says whether there are any, and a second request that
   // could only fail would throw away the issue it just read.
@@ -347,12 +423,22 @@ export function assembleIssue(
  * request adding an entry to a curated list is written against how that list
  * already reads.
  */
-async function fetchReadme(repo: string): Promise<ContextResult> {
+async function fetchReadme(repo: string): Promise<Retrieval> {
   const path = `repos/${repo}/readme`;
   const response = await githubRequest(path, "application/vnd.github.raw+json");
-  // GitHub answers a repository without a README the same as a missing one.
+  // GitHub answers a repository without a README the same as one it no longer
+  // lets Obserf read, so the repository itself settles which: a list without a
+  // README is still a list to submit to, and a vanished one is not.
   if (response.status === 404) {
-    return { context: null, warning: `${repo} has no README, or is gone or private` };
+    const exists = await githubJson(`repos/${repo}`);
+    if ("failure" in exists && exists.status === 404) return { refused: unreadable(repo) };
+    return {
+      context: null,
+      warning:
+        "failure" in exists
+          ? `${repo} has no README, or could not be read: ${exists.failure}`
+          : `${repo} has no README`,
+    };
   }
   const failure = githubFailure(path, response);
   if (failure) return { context: null, warning: failure };
@@ -424,12 +510,14 @@ async function githubRequest(path: string, accept?: string): Promise<Response> {
  * the shape it expects: an array where an issue should be is a failed lookup,
  * not an empty thread.
  */
-async function githubJson(path: string): Promise<{ value: object } | { failure: string }> {
+async function githubJson(
+  path: string,
+): Promise<{ value: object } | { failure: string; status?: number }> {
   let value: unknown;
   try {
     const response = await githubRequest(path);
     const failure = githubFailure(path, response);
-    if (failure) return { failure };
+    if (failure) return { failure, status: response.status };
     value = await response.json();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

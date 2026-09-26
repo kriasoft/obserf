@@ -34,13 +34,14 @@ import {
   storedProjects,
 } from "./db";
 import { backup, backups, restore } from "./db/backup";
-import type { Assessment, Finding } from "./db/schema";
+import type { Assessment, Draft, Finding } from "./db/schema";
 import { venueRuleFor, type ProjectProfile } from "./project";
 import {
   DRAFT_KINDS,
   EVERGREEN,
   TRIAGE_STATUSES,
   defaultKindFor,
+  draftContextNote,
   type OpportunityType,
   type SourceId,
   type TriageStatus,
@@ -884,6 +885,7 @@ async function runShow(idArg: string | undefined) {
     console.log(
       `\n${bold(`Draft (${draft.kind})`)} ${dim(`${day(draft.createdAt)} · ${draft.model}`)}`,
     );
+    console.log(contextLine(draft));
     console.log(draft.body);
   }
 
@@ -891,6 +893,15 @@ async function runShow(idArg: string | undefined) {
     const project = profiles.find((p) => p.key === finding.project);
     console.log(`\n${venueReminder(finding, project)}`);
   }
+}
+
+/**
+ * What the draft was written against, printed with stored drafts too: re-reading
+ * one before posting is when it matters. Only a complete read is dimmed.
+ */
+function contextLine(draft: Draft): string {
+  const { text, complete } = draftContextNote(draft.contextSource, draft.contextWarning);
+  return complete ? dim(text) : text;
 }
 
 /** The four judgments, phrased identically wherever an assessment is printed. */
@@ -931,16 +942,10 @@ async function runDraft(idArg: string | undefined, kindArg: string | undefined) 
   }
   const project = projectByKey(await loadProjects(), view.finding.project);
 
-  const result = await generateDraft(project, view.finding, kind, view.assessment?.reason);
+  const draft = await generateDraft(project, view.finding, kind, view.assessment?.reason);
   console.log(`${bold(`Draft (${kind}) for #${view.finding.id}`)} ${dim(view.finding.url)}`);
-  // The warning prints whether or not context was retrieved: partial context and
-  // none are different risks. Only a complete read is dimmed.
-  const provenance = result.contextVia
-    ? `fetched live (${result.contextVia})`
-    : "could not fetch it live, so this is from the stored excerpt";
-  const line = `${provenance}${result.contextWarning ? `: ${result.contextWarning}` : ""}\n`;
-  console.log(result.contextVia && !result.contextWarning ? dim(line) : line);
-  console.log(result.body);
+  console.log(`${contextLine(draft)}\n`);
+  console.log(draft.body);
   console.log(`\n${venueReminder(view.finding, project)}`);
 }
 

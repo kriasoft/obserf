@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   assembleIssue,
+  fetchContext,
   githubFailure,
   githubTarget,
   hackerNewsContext,
@@ -339,5 +340,156 @@ describe("hackerNewsContext", () => {
   test("a cut inside the target is not described as missing replies", () => {
     const { warning } = hackerNewsContext(comment("x".repeat(9000)));
     expect(warning).toContain("the rest of the thread was not read");
+  });
+});
+
+/**
+ * Refused only on a fact the fetch established. What it cannot establish still
+ * drafts, with a warning: from the excerpt when there is no thread to read,
+ * beside the thread when only a check failed.
+ */
+describe("fetchContext refusal", () => {
+  const real = globalThis.fetch;
+  const token = process.env.GITHUB_TOKEN;
+  beforeEach(() => {
+    // Keeps the header lookup off the gh CLI.
+    process.env.GITHUB_TOKEN = "test";
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+    if (token === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = token;
+  });
+
+  /** Answers each request by the first route whose key its URL contains. */
+  const serve = (routes: Record<string, () => Response>) => {
+    globalThis.fetch = (async (input: URL | string) => {
+      const url = String(input);
+      const route = Object.keys(routes).find((key) => url.includes(key));
+      if (!route) throw new Error(`unexpected request ${url}`);
+      return routes[route]!();
+    }) as typeof fetch;
+  };
+
+  test("a locked GitHub issue is refused; a closed but unlocked one is not", async () => {
+    serve({
+      "/issues/1": () => Response.json({ title: "t", body: "b", locked: true, comments: 0 }),
+    });
+    expect(await fetchContext("https://github.com/o/r/issues/1")).toEqual({
+      refused: "o/r#1 is locked to collaborators",
+    });
+
+    serve({
+      "/issues/2": () =>
+        Response.json({ title: "t", body: "b", state: "closed", locked: false, comments: 0 }),
+    });
+    expect(await fetchContext("https://github.com/o/r/issues/2")).toMatchObject({
+      context: { via: "github-api" },
+    });
+  });
+
+  test("410 is deleted; 404 is unreadable now; a README 404 asks the repository", async () => {
+    serve({ "/issues/3": () => new Response("", { status: 410 }) });
+    expect(await fetchContext("https://github.com/o/r/issues/3")).toEqual({
+      refused: "o/r#3 was deleted",
+    });
+
+    serve({ "/issues/4": () => new Response("", { status: 404 }) });
+    expect(await fetchContext("https://github.com/o/r/issues/4")).toEqual({
+      refused: expect.stringContaining("GitHub returns 404 for o/r#4"),
+    });
+
+    // A curated list without a README is still a list to submit to.
+    serve({
+      "/readme": () => new Response("", { status: 404 }),
+      "/repos/o/r": () => Response.json({ full_name: "o/r" }),
+    });
+    expect(await fetchContext("https://github.com/o/r")).toEqual({
+      context: null,
+      warning: "o/r has no README",
+    });
+
+    // The same README 404 from a repository Obserf can no longer read.
+    serve({
+      "/readme": () => new Response("", { status: 404 }),
+      "/repos/o/r": () => new Response("", { status: 404 }),
+    });
+    expect(await fetchContext("https://github.com/o/r")).toEqual({
+      refused: expect.stringContaining("GitHub returns 404 for o/r:"),
+    });
+
+    // A check that fails proves nothing either way.
+    serve({
+      "/readme": () => new Response("", { status: 404 }),
+      "/repos/o/r": () => new Response("", { status: 502 }),
+    });
+    expect(await fetchContext("https://github.com/o/r")).toMatchObject({
+      context: null,
+      warning: expect.stringContaining("has no README, or could not be read"),
+    });
+  });
+
+  test("a dead Hacker News item is refused, and a failed check is a warning", async () => {
+    const thread = () => Response.json({ title: "t", text: "hello", author: "a", children: [] });
+    serve({ "firebaseio.com": () => Response.json({ id: 5, dead: true }), "algolia.com": thread });
+    expect(await fetchContext("https://news.ycombinator.com/item?id=5")).toEqual({
+      refused: "the Hacker News item is dead",
+    });
+
+    // The thread fetch failing does not discard what the other request established.
+    serve({
+      "firebaseio.com": () => Response.json({ id: 5, deleted: true }),
+      "algolia.com": () => {
+        throw new Error("timed out");
+      },
+    });
+    expect(await fetchContext("https://news.ycombinator.com/item?id=5")).toEqual({
+      refused: "the Hacker News item was deleted",
+    });
+
+    // Drafted, since a failed check proves nothing, but not presented as checked.
+    serve({ "firebaseio.com": () => new Response("", { status: 500 }), "algolia.com": thread });
+    expect(await fetchContext("https://news.ycombinator.com/item?id=5")).toMatchObject({
+      context: { via: "hn-algolia" },
+      warning: expect.stringContaining("could not check"),
+    });
+  });
+
+  test("a live comment is refused under a dead story, and only a dead one", async () => {
+    const comment = (story: object) => ({
+      "item/6.json": () => Response.json({ id: 6, type: "comment" }),
+      "item/9.json": () => Response.json({ id: 9, ...story }),
+      "algolia.com": () =>
+        Response.json({ type: "comment", story_id: 9, text: "hi", author: "a", children: [] }),
+    });
+    serve(comment({ dead: true }));
+    expect(await fetchContext("https://news.ycombinator.com/item?id=6")).toEqual({
+      refused: "the Hacker News story it belongs to is dead",
+    });
+
+    // Drafted, and as checked: the story answered, it just was not dead.
+    serve(comment({ deleted: true }));
+    const underDeleted = await fetchContext("https://news.ycombinator.com/item?id=6");
+    expect(underDeleted).toMatchObject({ context: { via: "hn-algolia" } });
+    expect((underDeleted as { warning?: string }).warning).not.toContain("could not check");
+  });
+
+  test("an answer that is not about the item, or a story never named, is unchecked", async () => {
+    serve({
+      "item/7.json": () => Response.json({}),
+      "algolia.com": () => Response.json({ title: "t", text: "hi", author: "a", children: [] }),
+    });
+    expect(await fetchContext("https://news.ycombinator.com/item?id=7")).toMatchObject({
+      warning: expect.stringContaining("could not check"),
+    });
+
+    serve({
+      "item/8.json": () => Response.json({ id: 8, type: "comment" }),
+      "algolia.com": () =>
+        Response.json({ type: "comment", text: "hi", author: "a", children: [] }),
+    });
+    expect(await fetchContext("https://news.ycombinator.com/item?id=8")).toMatchObject({
+      warning: expect.stringContaining("could not check"),
+    });
   });
 });
