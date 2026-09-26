@@ -284,6 +284,29 @@ export async function serve(port = 4000) {
         );
       }),
 
+      /**
+       * How many findings each status holds, under the same project and minimum
+       * score as the list, so a tab's count is what opening it would show —
+       * uncapped, where the list stops at its limit. Scored like the list, since
+       * the minimum applies to the score now.
+       */
+      "/api/counts": local(async (req) => {
+        const url = new URL(req.url);
+        const shape = unexpectedParams(url, ["project", "min"]);
+        if (shape) return shape;
+        const project = projectParam(url, (await profiles()).projects);
+        if (project instanceof Response) return project;
+        const minScore = intParam(url, "min", 1, 0);
+        if (minScore instanceof Response) return minScore;
+
+        const counts = Object.fromEntries(TRIAGE_STATUSES.map((s) => [s, 0])) as Record<
+          TriageStatus,
+          number
+        >;
+        for (const row of rank(latestFindings({ project }), { minScore })) counts[row.status]++;
+        return json(counts);
+      }),
+
       "/api/findings/:id": local(async (req) => {
         const id = findingIdIn(req.params);
         if (id instanceof Response) return id;

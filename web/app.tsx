@@ -17,7 +17,7 @@ import { type TriageOptions, scoreClass, Detail } from "./detail";
 import "./app.css";
 
 /**
- * Bound the list request and rendering cost. The toolbar marks a result at the
+ * Bound the list request and rendering cost. The list head marks a result at the
  * cap; it may be incomplete, including when zero scores are shown.
  */
 const LIMIT = 200;
@@ -43,6 +43,9 @@ function App() {
    * is `status`, and never touches the score.
    */
   const [withZeros, setWithZeros] = useState(false);
+  /** Findings per status under the project and zeros in force; null while unknown. */
+  const [counts, setCounts] = useState<Record<TriageStatus, number> | null>(null);
+  const [countsError, setCountsError] = useState<string | null>(null);
   /**
    * Reason-hidden review: a `new` finding's score, components, opportunity type
    * and reason stay hidden until it is triaged or revealed, so the operator
@@ -139,6 +142,7 @@ function App() {
   const listTicket = useRef(0);
   /** The same guard for the scan line, which follows the project filter too. */
   const scanTicket = useRef(0);
+  const countsTicket = useRef(0);
   /** Where to land if the current selection leaves the filtered list. */
   const prefer = useRef<number[]>([]);
   const pane = useRef<HTMLDivElement>(null);
@@ -261,6 +265,29 @@ function App() {
       }
     })();
   }, [project, status, withZeros, revision]);
+
+  // Cleared when they stop describing the filters, as the list is; a count for
+  // another project beside this one's tab would read as this one's.
+  useEffect(() => {
+    setCounts(null);
+    setCountsError(null);
+  }, [project, withZeros]);
+
+  // Its own request, reloaded with the list so a triage moves a count at once.
+  useEffect(() => {
+    const params = new URLSearchParams({ min: withZeros ? "0" : "1" });
+    if (project) params.set("project", project);
+    const ticket = ++countsTicket.current;
+    requestJson<Record<TriageStatus, number>>(`/api/counts?${params}`)
+      .then((next) => {
+        if (ticket !== countsTicket.current) return;
+        setCounts(next);
+        setCountsError(null);
+      })
+      .catch((cause: unknown) => {
+        if (ticket === countsTicket.current) setCountsError(messageOf(cause));
+      });
+  }, [project, withZeros, revision]);
 
   // Reloaded with the list, not only on a project change, so a scan that finished
   // meanwhile leaves no stale warning. A separate request: each is usable when
@@ -570,82 +597,100 @@ function App() {
 
   return (
     <div className="layout">
-      <div className="list">
-        <div className="toolbar">
-          <select aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
-            <option value="">All projects</option>
-            {projects?.map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.name}
-              </option>
-            ))}
-            {/* The control must always name the filter in force: a project retired
+      <header className="topbar">
+        <select aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
+          <option value="">All projects</option>
+          {projects?.map((p) => (
+            <option key={p.key} value={p.key}>
+              {p.name}
+            </option>
+          ))}
+          {/* The control must always name the filter in force: a project retired
                 while selected still has findings to read, and a failed refresh
                 empties the list without changing what the findings are filtered by.
                 "No profile" only when the list loaded and lacks it, and not from the
                 last good profiles while the current ones fail to load. */}
-            {project && !projects?.some((p) => p.key === project) && (
-              <option value={project}>
-                {project}
-                {projects && !profileError ? " (no profile)" : ""}
-              </option>
-            )}
-          </select>
-          <select
-            aria-label="Triage status"
-            value={status}
-            onChange={(e) => setStatus(e.target.value as TriageStatus)}
-          >
-            {TRIAGE_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-          <label
-            className="muted"
-            title="Zero-scored findings, including everything the model disqualified"
-          >
-            <input
-              type="checkbox"
-              aria-label="Show zero-scored findings"
-              checked={withZeros}
-              onChange={(e) => setWithZeros(e.target.checked)}
-            />
-            zeros
-          </label>
-          <label
-            className="muted"
-            title="Hide the model's score, type and reason on new findings until you triage them or press r"
-          >
-            <input
-              type="checkbox"
-              aria-label="Hide the model's score and reason on new findings"
-              checked={hideJudgment}
-              onChange={(e) => setHideJudgment(e.target.checked)}
-            />
-            hide reasons
-          </label>
+          {project && !projects?.some((p) => p.key === project) && (
+            <option value={project}>
+              {project}
+              {projects && !profileError ? " (no profile)" : ""}
+            </option>
+          )}
+        </select>
+        <div
+          className="tabs"
+          role="group"
+          aria-label="Triage status"
+          title={countsError ?? undefined}
+        >
+          {TRIAGE_STATUSES.map((s) => {
+            const label = s[0]!.toUpperCase() + s.slice(1);
+            const n = counts?.[s];
+            return (
+              <button
+                key={s}
+                type="button"
+                aria-pressed={s === status}
+                aria-label={n === undefined ? label : `${label}, ${n} findings`}
+                onClick={() => setStatus(s)}
+              >
+                {label}
+                <span className="n">{n ?? (countsError ? "?" : "")}</span>
+              </button>
+            );
+          })}
+        </div>
+        <span className="spacer" />
+        <label
+          className="muted"
+          title="Zero-scored findings, including everything the model disqualified"
+        >
+          <input
+            type="checkbox"
+            aria-label="Show zero-scored findings"
+            checked={withZeros}
+            onChange={(e) => setWithZeros(e.target.checked)}
+          />
+          zeros
+        </label>
+        <label
+          className="muted"
+          title="Hide the model's score, type and reason on new findings until you triage them or press r"
+        >
+          <input
+            type="checkbox"
+            aria-label="Hide the model's score and reason on new findings"
+            checked={hideJudgment}
+            onChange={(e) => setHideJudgment(e.target.checked)}
+          />
+          hide reasons
+        </label>
+        <ThemeToggle />
+        <button
+          type="button"
+          className="icon"
+          aria-label="Keyboard shortcuts"
+          aria-keyshortcuts="?"
+          title="Keyboard shortcuts (?)"
+          onClick={() => setShortcutsOpen(true)}
+        >
+          ?
+        </button>
+      </header>
+
+      <div className="list">
+        <p className="list-head muted small">
           <span
-            className="muted count"
+            className="count"
             title={
               items?.length === LIMIT ? `The list stops at ${LIMIT}; there may be more.` : undefined
             }
           >
-            {items ? `${items.length}${items.length === LIMIT ? " (cap)" : ""}` : "…"}
+            {items
+              ? `${items.length} ${status}${items.length === LIMIT ? " · the list stops here" : ""}`
+              : "…"}
           </span>
-          <ThemeToggle />
-          <button
-            type="button"
-            className="icon"
-            aria-label="Keyboard shortcuts"
-            aria-keyshortcuts="?"
-            title="Keyboard shortcuts (?)"
-            onClick={() => setShortcutsOpen(true)}
-          >
-            ?
-          </button>
-        </div>
+        </p>
 
         <ScanStatus
           runs={scans}
