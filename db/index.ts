@@ -518,14 +518,11 @@ export function runById(id: number): schema.Run | undefined {
 }
 
 /**
- * The most recent scan of each project, newest first. By id, as in `recentRuns`:
- * timestamps can tie at a stored second, or go back.
- */
-/**
- * Where the run record stands, in two numbers that only grow: the newest run's
- * id, raised when a scan starts, and how many runs have finished. One marker
- * covering another in both means nothing was recorded that it lacks. The inbox
- * reads it with its list, to tell whether a scan has landed since.
+ * Where the run record stands, in two numbers that only grow until a backup is
+ * restored: the newest run's id, raised when a scan starts, and how many runs
+ * have finished. One marker covering another in both means nothing was recorded
+ * that it lacks. The inbox reads it with its list, to tell whether a scan has
+ * landed since.
  */
 export function runsMarker(project?: string): { lastRun: number; finished: number } {
   const [row] = db
@@ -539,6 +536,10 @@ export function runsMarker(project?: string): { lastRun: number; finished: numbe
   return row ?? { lastRun: 0, finished: 0 };
 }
 
+/**
+ * The most recent scan of each project, newest first. By id, as in `recentRuns`:
+ * timestamps can tie at a stored second, or go back.
+ */
 export function latestRunPerProject(): schema.Run[] {
   const newest = db
     .select({ id: sql<number>`max(${schema.runs.id})` })
