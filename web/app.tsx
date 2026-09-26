@@ -180,8 +180,9 @@ function applyTheme(theme: Theme) {
 
 /**
  * Whether a keystroke is the inbox's to take: no modifier beyond Shift, and not
- * aimed at a focused control. List rows are buttons as well, and moving through
- * them from the keyboard is the whole point, so they are the exception.
+ * typed into a field. Text boxes and a select's type-ahead own their letters;
+ * buttons, links and checkboxes use no letter, digit or arrow, so keys pass
+ * through them — a mouse click on one must not strand the keyboard mid-queue.
  */
 function isShortcut(event: KeyboardEvent): boolean {
   if (event.metaKey || event.ctrlKey || event.altKey) return false;
@@ -189,7 +190,7 @@ function isShortcut(event: KeyboardEvent): boolean {
   // not modal: a key meant for it must not triage or move the selection.
   if (document.querySelector("dialog:modal, :popover-open")) return false;
   const target = event.target as HTMLElement | null;
-  return !target?.closest("input, textarea, select, a, button:not(.item)");
+  return !target?.closest('textarea, select, input:not([type="checkbox"]), [contenteditable]');
 }
 
 interface UndoRecord {
