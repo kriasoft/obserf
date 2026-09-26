@@ -518,22 +518,37 @@ export function runById(id: number): schema.Run | undefined {
 }
 
 /**
- * Where the run record stands, in two numbers that only grow until a backup is
- * restored: the newest run's id, raised when a scan starts, and how many runs
- * have finished. One marker covering another in both means nothing was recorded
- * that it lacks. The inbox reads it with its list, to tell whether a scan has
- * landed since.
+ * Where the scan record stands, in three numbers that only grow until a backup
+ * is restored: the newest run's id, raised when a scan starts; how many runs
+ * have finished; and the newest assessment's id, raised as a running scan stores
+ * each verdict, new finding or reassessed. One marker covering another in all
+ * three means nothing was recorded that it lacks. The inbox reads it with its
+ * list, to tell whether a scan has changed the queue since.
  */
-export function runsMarker(project?: string): { lastRun: number; finished: number } {
-  const [row] = db
+export function runsMarker(project?: string): {
+  lastRun: number;
+  finished: number;
+  lastAssessment: number;
+} {
+  const runs = db
     .select({
       lastRun: sql<number>`coalesce(max(${schema.runs.id}), 0)`,
       finished: sql<number>`count(${schema.runs.finishedAt})`,
     })
     .from(schema.runs)
     .where(project ? eq(schema.runs.project, project) : undefined)
-    .all();
-  return row ?? { lastRun: 0, finished: 0 };
+    .all()[0];
+  const assessments = db
+    .select({ lastAssessment: sql<number>`coalesce(max(${schema.assessments.id}), 0)` })
+    .from(schema.assessments)
+    .innerJoin(schema.findings, eq(schema.findings.id, schema.assessments.findingId))
+    .where(project ? eq(schema.findings.project, project) : undefined)
+    .all()[0];
+  return {
+    lastRun: runs?.lastRun ?? 0,
+    finished: runs?.finished ?? 0,
+    lastAssessment: assessments?.lastAssessment ?? 0,
+  };
 }
 
 /**

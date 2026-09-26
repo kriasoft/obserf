@@ -356,8 +356,10 @@ function App() {
    * A scan runs in a terminal beside this window, so returning to the tab is the
    * moment the list is most likely to be stale. If a run has been recorded since
    * the list loaded, the queue is not reordered under the operator mid-review:
-   * a banner offers the refresh instead. Otherwise the reload goes ahead, which
-   * picks up anything decided from the terminal. An unsaved note survives both.
+   * a banner offers the refresh instead — a scan still running counts, since the
+   * marker moves with each verdict it stores. Otherwise the reload goes ahead,
+   * which picks up anything decided from the terminal; a failed check does
+   * neither. An unsaved note survives all three.
    * `newerScan` is the run record the list does not include, with the list
    * request current when it was noticed; null when there is none.
    */
@@ -381,7 +383,8 @@ function App() {
         if (!shown || covers(shown, now)) changed();
         else setNewerScan({ marker: now, ticket });
       } catch {
-        if (ticket === listTicket.current) changed();
+        // Unknown is not "unchanged": a reload here could reorder the queue
+        // this check exists to hold still. The next focus asks again.
       }
     }
     const listener = () => void onFocus();
@@ -799,14 +802,18 @@ function App() {
           </span>
         </p>
 
-        {newerScan && (
-          <div className="refresh-banner" role="status">
-            <span>A newer scan has been recorded since this list loaded.</span>
-            <button type="button" onClick={changed}>
-              Refresh
-            </button>
-          </div>
-        )}
+        {/* The region is always mounted, so the banner appearing inside it is
+            announced; one that mounts with its text often is not. */}
+        <div role="status">
+          {newerScan && (
+            <div className="refresh-banner">
+              <span>A scan has run since this list loaded.</span>
+              <button type="button" onClick={changed}>
+                Refresh
+              </button>
+            </div>
+          )}
+        </div>
         {listError && <ListError error={listError} stale={items !== null} onRetry={changed} />}
         {error && <p className="error pad">{error}</p>}
 

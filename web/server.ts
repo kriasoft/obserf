@@ -304,7 +304,9 @@ export async function serve(port = 4000) {
             zeroedBy: row.assessment ? hardZero(row.assessment) : null,
           })),
           200,
-          { "X-Runs-Marker": `${marker.lastRun}.${marker.finished}` },
+          {
+            "X-Runs-Marker": `${marker.lastRun}.${marker.finished}.${marker.lastAssessment}`,
+          },
         );
       }),
 
