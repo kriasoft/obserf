@@ -880,6 +880,8 @@ function App() {
               onTriage={triage}
               onChanged={changed}
               pendingNotes={pendingNotes}
+              // The banner shows it only while the projects request succeeds.
+              bannerShowsProfileError={profileError !== null && projectsError === null}
             />
           )}
         </div>

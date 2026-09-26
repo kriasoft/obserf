@@ -58,6 +58,7 @@ export function Detail({
   onTriage,
   onChanged,
   pendingNotes,
+  bannerShowsProfileError,
 }: {
   id: number;
   revision: number;
@@ -67,6 +68,8 @@ export function Detail({
   onTriage: (id: number, status: TriageStatus, options?: TriageOptions) => Promise<boolean>;
   onChanged: () => void;
   pendingNotes: Map<number, string>;
+  /** The header's banner already carries the profile error text. */
+  bannerShowsProfileError: boolean;
 }) {
   const [detail, setDetail] = useState<FindingDetail | null>(null);
   /**
@@ -342,10 +345,13 @@ export function Detail({
               )}
             </p>
           )}
-          {/* The error itself is in the banner under the header; this says what
-              it means here. */}
+          {/* The error itself is in the banner under the header, when the banner
+              has it; the two are separate requests, and this one can know first. */}
           {profileError && (
-            <p className="warn small">Drafting is off until the profiles on disk load.</p>
+            <p className="warn small">
+              Drafting is off until the profiles on disk load
+              {bannerShowsProfileError ? "." : `: ${profileError}`}
+            </p>
           )}
           {!profileAvailable && !profileError && (
             <p className="warn small">
