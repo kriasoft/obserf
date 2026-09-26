@@ -1,14 +1,16 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clipped, colourable, listArg, wrapped } from "../cli";
 import { migrate } from "../db/migrate";
 
 /**
- * The CLI run as a CLI, for what is true of the process rather than of a return
- * value. `main()` sits behind `import.meta.main`, so a test spawns it the way an
- * operator runs it, against a workspace of its own.
+ * The CLI run as a CLI, for the properties that are about the process rather
+ * than about a return value: refusing before anything is touched, and what the
+ * exit code is. `main()` is behind `import.meta.main`, so the helpers below can
+ * simply be imported and called.
  */
 const CLI = join(import.meta.dir, "..", "cli.ts");
 
@@ -16,6 +18,21 @@ const roots: string[] = [];
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
+
+/** A workspace with one usable profile, and no database yet. */
+function workspace(): string {
+  const root = mkdtempSync(join(tmpdir(), "obserf-cli-"));
+  roots.push(root);
+  mkdirSync(join(root, "projects"), { recursive: true });
+  writeFileSync(join(root, "obserf.config.ts"), "export default {};");
+  writeFileSync(
+    join(root, "projects", "p.ts"),
+    `export default { key: "p", name: "P", url: "https://e.com", pitch: "p",
+       solves: ["s"], notFor: ["n"], voice: "v",
+       queries: { search: ["a"], subreddits: [], github: [] } };`,
+  );
+  return root;
+}
 
 async function run(root: string, ...args: string[]) {
   const child = Bun.spawn(["bun", CLI, ...args], {
@@ -32,13 +49,17 @@ async function run(root: string, ...args: string[]) {
   return { code: await child.exited, output: stdout + stderr, stdout };
 }
 
+/**
+ * `obserf draft` has always printed what the operator verified about the venue
+ * and what obserf cannot establish — permission and cost — because that is the
+ * moment a draft is acted on. `obserf show` prints stored drafts, which is the
+ * other moment, and used to print them bare. The inbox already carries the rule
+ * on the finding for exactly this reason; the two front ends have to agree.
+ */
 describe("a stored draft, re-read", () => {
   /** A finding with a draft against it, and a profile that recorded a venue rule. */
   function workspaceWithADraft(guidance: string | null): string {
-    const root = mkdtempSync(join(tmpdir(), "obserf-cli-"));
-    roots.push(root);
-    mkdirSync(join(root, "projects"), { recursive: true });
-    writeFileSync(join(root, "obserf.config.ts"), "export default {};");
+    const root = workspace();
     writeFileSync(
       join(root, "projects", "p.ts"),
       `export default { key: "p", name: "P", url: "https://e.com", pitch: "p",
@@ -83,6 +104,9 @@ describe("a stored draft, re-read", () => {
     // and neither of the other two conditions.
     expect(output).toContain("permitted");
     expect(output).toContain("costs");
+    // And says where what they check goes, since that is the only thing that
+    // makes the claim stronger next time.
+    expect(output).toContain("venueGuidance");
   });
 
   /**
@@ -123,6 +147,253 @@ describe("a stored draft, re-read", () => {
     expect(code).not.toBe(0);
     expect(stdout).not.toContain("a draft body");
     expect(output).toContain("venueGuidance");
+  });
+});
+
+describe("a flag the command does not use", () => {
+  test("is refused, and says what the command does take", async () => {
+    const { code, output } = await run(workspace(), "scan", "--limit", "3");
+    expect(code).not.toBe(0);
+    expect(output).toContain("`obserf scan` does not take --limit");
+    expect(output).toContain("--project, --source, --dry-run");
+  });
+
+  /**
+   * The one that has to be refused before anything happens: a snapshot taken on
+   * the way to rejecting the flag is a side effect of a command that failed.
+   */
+  test("is refused before the command touches the workspace", async () => {
+    const root = workspace();
+    const { code, output } = await run(root, "backup", "--project", "p");
+    expect(code).not.toBe(0);
+    expect(output).toContain("It takes no options");
+    expect(existsSync(join(root, ".obserf"))).toBe(false);
+  });
+
+  test("a command with no options at all says so", async () => {
+    const { output } = await run(workspace(), "projects", "--min", "5");
+    expect(output).toContain("`obserf projects` does not take --min. It takes no options.");
+  });
+});
+
+describe("a surplus argument", () => {
+  test("is refused rather than dropped", async () => {
+    const { code, output } = await run(workspace(), "show", "12", "34");
+    expect(code).not.toBe(0);
+    expect(output).toContain(`"34" would be ignored`);
+  });
+});
+
+/** Last-wins for a flag that is not a list: `--min 80 --min 1` listed everything. */
+describe("a repeated flag", () => {
+  test("is refused rather than half-read", async () => {
+    const { code, output } = await run(workspace(), "list", "--min", "80", "--min", "1");
+    expect(code).not.toBe(0);
+    expect(output).toContain("--min was given more than once");
+  });
+});
+
+describe("what a command still accepts", () => {
+  test("its own flags pass through", async () => {
+    // `--status` twice: a list flag, so not refused as a repeat.
+    const { code, output } = await run(
+      workspace(),
+      "list",
+      "--project",
+      "p",
+      "--min",
+      "0",
+      "--status",
+      "new",
+      "--status",
+      "acted",
+    );
+    expect(code).toBe(0);
+    expect(output).toContain("Nothing to show");
+  });
+
+  /** Help is what you run when you do not know the grammar. */
+  test("help does not insist on the grammar", async () => {
+    const { code, output } = await run(workspace(), "help", "--port", "9");
+    expect(code).toBe(0);
+    expect(output).toContain("Usage: obserf <command>");
+  });
+});
+
+describe("what a command was not given", () => {
+  /** The lookup opens and upgrades the database; the complaint comes first. */
+  test("a missing status is reported without looking the finding up", async () => {
+    const root = workspace();
+    const { output } = await run(root, "triage", "5");
+    expect(output).toContain("Expected a status");
+    expect(existsSync(join(root, ".obserf"))).toBe(false);
+  });
+
+  /** `draft` and `triage` reach the same check and were told to run `show`. */
+  test("a missing id names no particular command", async () => {
+    const { output } = await run(workspace(), "draft");
+    expect(output).toContain("Expected a finding id");
+    expect(output).not.toContain("obserf show");
+  });
+});
+
+/** `1e2` read as finding 100, and `repyl` was caught only after the database opened. */
+describe("input rejected before the database opens", () => {
+  test.each([
+    [["draft", "1", "--kind", "repyl"], `Unknown draft kind "repyl"`],
+    [["show", "1e2"], `Expected a finding id like 12, not "1e2"`],
+  ])("%p", async (args, message) => {
+    const root = workspace();
+    const { code, output } = await run(root, ...args);
+    expect(code).not.toBe(0);
+    expect(output).toContain(message);
+    expect(existsSync(join(root, ".obserf"))).toBe(false);
+  });
+});
+
+/**
+ * A title is other people's text, and the row it goes in is a fixed width, so
+ * the cut is by column and grapheme, not `slice`.
+ */
+describe("clipped", () => {
+  test("leaves a title that already fits", () => {
+    expect(clipped("short enough", 40)).toBe("short enough");
+  });
+
+  /** The ellipsis counts against the budget, so no room means nothing at all. */
+  test("fits the ellipsis into the smallest budgets", () => {
+    expect(clipped("xy", 1)).toBe("…");
+    expect(clipped("xy", 0)).toBe("");
+  });
+
+  test("marks the cut, and stays inside the budget", () => {
+    const cut = clipped("a".repeat(90), 70);
+    expect(cut.endsWith("…")).toBe(true);
+    expect(Bun.stringWidth(cut)).toBeLessThanOrEqual(70);
+  });
+
+  /** `slice(0, 70)` ended on `\ud83d`, which a terminal draws as a lone box. */
+  test("never ends on half an emoji", () => {
+    const cut = clipped(`${"x".repeat(69)}🚀 rocket mode`, 70);
+    const body = cut.endsWith("…") ? cut.slice(0, -1) : cut;
+    const last = body.charCodeAt(body.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    expect(Bun.stringWidth(cut)).toBeLessThanOrEqual(70);
+  });
+
+  /** The selector measures zero on its own and two as part of the heart. */
+  test("measures a character the way it is drawn, not code point by code point", () => {
+    expect(Bun.stringWidth(clipped(`${"x".repeat(67)}❤️abc`, 70))).toBeLessThanOrEqual(70);
+  });
+
+  /** Seventy of these are a hundred and forty columns wide. */
+  test("counts a wide character as the two columns it occupies", () => {
+    expect(Bun.stringWidth(clipped("构".repeat(80), 70))).toBeLessThanOrEqual(70);
+  });
+});
+
+describe("wrapped", () => {
+  const reason =
+    "A curated GitHub index of SaaS boilerplates — exactly the category this occupies — with a free way in via pull request.";
+
+  test("breaks prose to the width, every line under the same indent", () => {
+    const lines = wrapped(reason, "     ", 60).split("\n");
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) {
+      expect(line.startsWith("     ")).toBe(true);
+      expect(line.length).toBeLessThanOrEqual(60);
+    }
+    expect(lines.join(" ").replace(/\s+/g, " ").trim()).toBe(reason);
+  });
+
+  /** Width 0 is what `terminalWidth` reports off a terminal. */
+  test("leaves prose alone when the output is not a terminal", () => {
+    expect(wrapped(reason, "     ", 0)).toBe(`     ${reason}`);
+  });
+
+  test("keeps the line breaks and spacing the operator typed into a note", () => {
+    expect(wrapped("one\n\ntwo  three", "", 40)).toBe("one\n\ntwo  three");
+  });
+
+  /** Columns, not characters: titles and excerpts are other people's text. */
+  test("measures what a terminal shows, not what JavaScript counts", () => {
+    const cjk = "日本語の説明 日本語の説明 日本語の説明 日本語の説明 日本語の説明";
+    for (const line of wrapped(cjk, "     ", 40).split("\n")) {
+      expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+    }
+  });
+
+  /** A URL longer than the measure overflows rather than being broken in half. */
+  test("never splits a word", () => {
+    const long = "https://example.com/a/very/long/path/that/exceeds/the/width";
+    expect(wrapped(`see ${long}`, "", 30)).toBe(`see\n${long}`);
+  });
+});
+
+/**
+ * Colour was emitted unconditionally, so `obserf list > today.txt` wrote escape
+ * soup and `obserf show 42 | pbcopy` put escapes on the clipboard.
+ */
+describe("colourable", () => {
+  // `""`, not `undefined`: `undefined` falls through to the default parameter
+  // and reads the ambient NO_COLOR, so these would fail for anyone who sets it.
+  test("a terminal gets colour", () => {
+    expect(colourable({ isTTY: true }, "")).toBe(true);
+  });
+
+  test("anything that is not a terminal does not", () => {
+    expect(colourable({ isTTY: false }, "")).toBe(false);
+    expect(colourable({}, "")).toBe(false);
+  });
+
+  /** no-color.org: present and non-empty disables, whatever the value. */
+  test("NO_COLOR turns it off, and an empty NO_COLOR is not set", () => {
+    expect(colourable({ isTTY: true }, "1")).toBe(false);
+    expect(colourable({ isTTY: true }, "0")).toBe(false);
+    expect(colourable({ isTTY: true }, "")).toBe(true);
+  });
+});
+
+describe("output that is not going to a terminal", () => {
+  test("carries no escape sequences", async () => {
+    const root = workspace();
+    const { output } = await run(root, "list");
+    expect(output).not.toContain("\u001b[");
+  });
+
+  /** The one that broke: an error the operator would have redirected into a log. */
+  test("including an error", async () => {
+    const { output } = await run(workspace(), "show", "abc");
+    expect(output).toContain("Expected a finding id like 12");
+    expect(output).not.toContain("\u001b[");
+  });
+});
+
+/**
+ * `--status a --status b` kept only `b`, and `--source hn,github` arrived as one
+ * unknown id: the two list flags disagreed about their own syntax.
+ */
+describe("listArg", () => {
+  test("accepts a comma-separated list", () => {
+    expect(listArg("status", ["new,acted"])).toEqual(["new", "acted"]);
+  });
+
+  test("accepts a repeated flag", () => {
+    expect(listArg("status", ["new", "acted"])).toEqual(["new", "acted"]);
+  });
+
+  test("accepts the two mixed, and tolerates spacing", () => {
+    expect(listArg("source", ["hn, , github", "brave,"])).toEqual(["hn", "github", "brave"]);
+  });
+
+  test("absent is absent, which is not the same as empty", () => {
+    expect(listArg("status", undefined)).toBeUndefined();
+  });
+
+  /** `--status ,` asked for something; answering it with every status would not be it. */
+  test("given and empty is an error, not everything", () => {
+    expect(() => listArg("status", [""])).toThrow("--status was given no value");
+    expect(() => listArg("status", [" , "])).toThrow("--status was given no value");
   });
 });
 

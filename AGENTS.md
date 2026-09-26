@@ -22,7 +22,7 @@ Obserf ships no projects and no data. Profiles and state live in an operator's *
 
 There is no build step, so there is no `src/` — Bun runs the TypeScript at the root directly.
 
-- `cli.ts` – command dispatch and terminal output; presentation only
+- `cli.ts` – command dispatch and terminal output, and the only module that emits ANSI. Every style goes through `colourable`, decided per stream, so a redirected stdout is plain while an error on a still-attached stderr stays red. Beyond presentation it owns what belongs to an invocation rather than to the pipeline: which projects and findings a command acts on, and `ACCEPTS`, the flags and positional count each command answers to. One `parseArgs` declares every option, so without that check — run before dispatch, ahead of any database, profile or snapshot — a flag meant for another command, or a repeated single-valued one, parses cleanly and is ignored. `main()` sits behind `import.meta.main`, so a test can import the helpers
 - `config.ts` – environment and tunables; keys behind getters so importing needs none. Credential _resolution_ beyond reading an env var belongs in the adapter that needs it, not here — see `sources/github.ts`, which falls back to the `gh` CLI.
 - `agent.ts` – the only model surface: `ask`, `askForJson`, `pool`
 - `url.ts` – canonicalization, the dedupe key

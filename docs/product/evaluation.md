@@ -13,7 +13,7 @@ obserf list --project <key> --limit 10                     # today's inbox
 obserf list --project <key> --status new,shortlisted,acted,dismissed --min 0 --limit 10
 ```
 
-`--status` defaults to `new` and accepts a comma-separated list. That default matters twice: it hides everything already labelled, and labelling a finding removes it from the next default list — so a cohort changes under you as you work through it. Save the finding ids before labelling.
+`--status` defaults to `new` and takes more than one, comma-separated or by repeating the flag; `--source` takes either spelling too. That default matters twice: it hides everything already labelled, and labelling a finding removes it from the next default list — so a cohort changes under you as you work through it. Save the finding ids before labelling.
 
 Top-heavy on purpose. With one operator reading a few dozen findings, a bad result near the top costs more trust than a good one buried lower, and missing opportunities is cheaper than repeatedly recommending inappropriate ones. Five of ten is a target, not a measured baseline: demanding enough that half the first page must justify attention, without pretending ten findings are a sample. Fewer than ten eligible findings is inconclusive, not a pass.
 
