@@ -13,7 +13,8 @@ import {
   type TriageStatus,
 } from "../vocabulary";
 import type { ScoreExplanation } from "../pipeline/score";
-import { type FindingDetail, messageOf, requestJson, postJson } from "./api";
+import { type FindingDetail, type TriageOptions, messageOf, requestJson, postJson } from "./api";
+import { scoreClass } from "./finding-row";
 import { isShortcut } from "./keyboard";
 import { ActionBar } from "./action-bar";
 
@@ -32,28 +33,6 @@ const COMPONENTS: ReadonlyArray<[key: "relevance" | "intent" | "welcome" | "reac
 
 const DAY_MS = 86_400_000;
 
-export interface TriageOptions {
-  /** Omitted leaves the stored note alone; see `setTriage`. */
-  note?: string;
-  /** Added to the end of the stored note by the server, which reads it in the same statement. */
-  appendNote?: string;
-  /** Omitted leaves a dismissal's category alone; `null` clears it. */
-  category?: DismissalCategory | null;
-  /**
-   * False for anything that is not a new decision: an undo, or an amendment to
-   * the current one (its category, where it was posted). Only decisions install
-   * an undo record, and only a failed decision blocks category digits.
-   */
-  undoable?: boolean;
-  /**
-   * Checked when the write reaches the front of the queue; false drops it. For a
-   * write whose premise a queued one ahead of it can remove.
-   */
-  stillWanted?: () => boolean;
-  /** An amendment: refused unless the stored status is still `next`; see `setTriage`. */
-  amend?: boolean;
-}
-
 /**
  * Why the score is zero when a hard rule made it so. Worded as what the model
  * judged, not as fact about the venue: welcome 0 is its reading of the page, not
@@ -64,10 +43,6 @@ const ZEROED_BY: Record<NonNullable<ScoreExplanation["zeroedBy"]>, string> = {
   relevance: "Relevance is 0: not about the problem the project solves.",
   welcome: "Welcome is 0: the model judged a mention unwelcome here.",
 };
-
-export function scoreClass(score: number): string {
-  return score >= 70 ? "high" : score >= 40 ? "mid" : "low";
-}
 
 export function Detail({
   id,

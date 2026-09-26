@@ -4,16 +4,16 @@ import type { Run } from "../db/schema";
 import {
   DISMISSAL_CATEGORIES,
   TRIAGE_STATUSES,
-  compactAge,
   type DismissalCategory,
   type TriageStatus,
 } from "../vocabulary";
-import { type ListedFinding, messageOf, requestJson, postJson } from "./api";
+import { type ListedFinding, type TriageOptions, messageOf, requestJson, postJson } from "./api";
 import { TRIAGE_KEYS, isShortcut, ShortcutsDialog } from "./keyboard";
 import { ThemeToggle, applyTheme, storedTheme } from "./theme";
 import { type UndoRecord, UndoToast } from "./undo-toast";
 import { ScanStatus } from "./scan-status";
-import { type TriageOptions, scoreClass, Detail } from "./detail";
+import { Detail } from "./detail";
+import { FindingRow } from "./finding-row";
 import "./app.css";
 
 /**
@@ -724,59 +724,16 @@ function App() {
         )}
         {error && <p className="error pad">{error}</p>}
 
-        {items?.map(
-          ({ finding, assessment, note, drafts, score, status: rowStatus, latestScan }) => {
-            const hidden = hideJudgment && rowStatus === "new" && !revealed.has(finding.id);
-            return (
-              <button
-                type="button"
-                id={`finding-${finding.id}`}
-                key={finding.id}
-                className="item"
-                aria-current={finding.id === selectedId}
-                onClick={() => select(finding.id)}
-              >
-                {hidden ? (
-                  <span className="score" title="Hidden until triaged or revealed (r)">
-                    ·
-                  </span>
-                ) : (
-                  <span className={`score ${scoreClass(score)}`}>{assessment ? score : "–"}</span>
-                )}
-                <span>
-                  <span className="title">
-                    {finding.title}
-                    {latestScan && (
-                      <span
-                        className="mark"
-                        title={
-                          latestScan === "new"
-                            ? "First found by this project's latest scan"
-                            : "Assessed again by this project's latest scan"
-                        }
-                      >
-                        {latestScan}
-                      </span>
-                    )}
-                  </span>
-                  <span className="meta">
-                    {/* Only when unfiltered: which project a finding belongs to
-                    decides the voice a draft is written in. */}
-                    {!project && <b>{finding.project} · </b>}
-                    {finding.venue} ·{" "}
-                    <span title="The thread's age">{compactAge(finding.publishedAt)}</span>
-                    {!hidden && ` · ${assessment?.opportunity ?? "unassessed"}`}
-                    {/* Never "ready to post": a draft is unread text until the
-                    operator has read it. */}
-                    {drafts > 0 && ` · ${drafts} draft${drafts === 1 ? "" : "s"}`}
-                  </span>
-                  {/* Keep the operator's optional note distinct from the model's verdict. */}
-                  {note && <span className="rownote">{note}</span>}
-                </span>
-              </button>
-            );
-          },
-        )}
+        {items?.map((row) => (
+          <FindingRow
+            key={row.finding.id}
+            row={row}
+            selected={row.finding.id === selectedId}
+            hidden={hideJudgment && row.status === "new" && !revealed.has(row.finding.id)}
+            showProject={!project}
+            onSelect={() => select(row.finding.id)}
+          />
+        ))}
 
         {!error && !items && <p className="muted pad">Loading…</p>}
         {items?.length === 0 && (

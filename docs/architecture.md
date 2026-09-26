@@ -64,6 +64,7 @@ web/
   server.ts          Bun.serve with routes and HTML import
   index.html         The inbox's page, which loads app.tsx
   app.tsx            Review inbox (React): the list, triage and undo state
+  finding-row.tsx    One row of the list, and the score's colour bands
   detail.tsx         The selected finding: evidence, verdict, note, drafts
   action-bar.tsx     Decisions and drafting, pinned under the finding
   undo-toast.tsx     The last decision, its undo and its follow-up
