@@ -646,6 +646,20 @@ function App() {
   }, [triage, recordUndo]);
 
   /**
+   * Drops the offer to undo, never the decision. Queued: a reason or posted
+   * location submitted just before still waits on `chain`, and must find the
+   * record it names when its turn comes.
+   */
+  const closeUndo = useCallback(
+    (seq: number) => {
+      chain.current = chain.current.then(() => {
+        if (undoRef.current?.seq === seq) recordUndo(null);
+      });
+    },
+    [recordUndo],
+  );
+
+  /**
    * The cause of the latest dismissal, from a digit pressed after `d`. Tied to
    * the undo record rather than to the selection, which `d` has already moved
    * on: the category belongs to the finding just dismissed, and the operator is
@@ -987,7 +1001,7 @@ function App() {
             onUndo={() => void undoLast()}
             onCategorize={(category) => void categorize(category, undo.seq)}
             onPosted={(where) => void recordPosted(where)}
-            onClose={() => recordUndo(null)}
+            onClose={() => closeUndo(undo.seq)}
           />
         )}
       </div>

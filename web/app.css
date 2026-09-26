@@ -614,7 +614,8 @@ dialog.shortcuts:focus-visible {
 }
 .reasons {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* Two rows before the names ellipsize past recognition in a narrow pane. */
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 6px;
 }
 .reasons button {
