@@ -860,7 +860,8 @@ dialog.shortcuts:focus-visible {
   }
   .rail {
     position: sticky;
-    top: 0;
+    /* Clear of the mini title, which hangs 8px into the content box. */
+    top: 16px;
     padding-top: 4px;
     border-top: 0;
   }
@@ -1143,4 +1144,44 @@ code {
 }
 .list-state .actions:empty {
   display: none;
+}
+
+/* The finding's title, pinned once its header scrolls away. Zero height with
+   the bar hanging below, so showing it shifts nothing; the pane's padding is
+   spanned edge to edge. */
+.mini-head {
+  position: sticky;
+  top: -28px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* A flex item of the pane, which would otherwise shrink it on a long finding. */
+  flex: none;
+  height: 36px;
+  margin: -28px -32px -8px;
+  padding: 0 32px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s,
+    visibility 0.12s;
+}
+.mini-head[data-shown="true"] {
+  opacity: 1;
+  visibility: visible;
+}
+.mini-head .title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.mini-head .pill {
+  flex: none;
+  font-size: 12px;
 }

@@ -111,6 +111,31 @@ export function Detail({
    */
   const detailTicket = useRef(0);
 
+  /**
+   * Whether the header has scrolled out of the pane, which brings up a compact
+   * title: a long finding otherwise leaves the operator mid-draft with no way to
+   * see which finding the action bar below will act on.
+   */
+  const head = useRef<HTMLElement>(null);
+  const [pastHead, setPastHead] = useState(false);
+  const loaded = detail !== null;
+  useEffect(() => {
+    const el = head.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        // Above the pane, not merely out of it: the header can never be below.
+        if (!entry) return;
+        const top = entry.rootBounds?.top ?? 0;
+        setPastHead(!entry.isIntersecting && entry.boundingClientRect.bottom <= top);
+      },
+      // Less the bar's own height: it takes over as the header slides under it.
+      { root: el.closest(".detail"), rootMargin: "-36px 0px 0px 0px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [loaded]);
+
   const load = useCallback(async () => {
     const ticket = ++detailTicket.current;
     try {
@@ -239,9 +264,17 @@ export function Detail({
 
   return (
     <>
+      {/* Takes no room in the flow, so appearing never moves the content. A
+          visual echo of the heading below, so assistive technology skips it. */}
+      <div className="mini-head" data-shown={pastHead} aria-hidden="true" inert={!pastHead}>
+        <span className="title">{finding.title}</span>
+        <span className="pill" data-status={status}>
+          {status}
+        </span>
+      </div>
       <div className="detail-body">
         <div className="main">
-          <header className="finding-head">
+          <header className="finding-head" ref={head}>
             <p className="crumbs">
               <span>{finding.project}</span>
               <span aria-hidden="true">/</span>
