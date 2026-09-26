@@ -28,7 +28,7 @@ import {
   type TriageStatus,
 } from "../vocabulary";
 import { DraftRefused, generateDraft } from "../pipeline/draft";
-import { explain, rank } from "../pipeline/score";
+import { explain, hardZero, rank } from "../pipeline/score";
 import index from "./index.html";
 
 function json(data: unknown, status = 200, headers?: HeadersInit): Response {
@@ -295,7 +295,14 @@ export async function serve(port = 4000) {
         // a missed one.
         const marker = runsMarker(project);
         return json(
-          rank(latestFindings({ project, status: status as TriageStatus[] }), { minScore, limit }),
+          rank(latestFindings({ project, status: status as TriageStatus[] }), {
+            minScore,
+            limit,
+          }).map((row) => ({
+            ...row,
+            // Which zero is a rule's rather than the arithmetic's; the list marks it.
+            zeroedBy: row.assessment ? hardZero(row.assessment) : null,
+          })),
           200,
           { "X-Runs-Marker": `${marker.lastRun}.${marker.finished}` },
         );

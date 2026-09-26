@@ -1,16 +1,19 @@
 import { compactAge } from "../vocabulary";
 import type { ListedFinding } from "./api";
 
-export function scoreClass(score: number): string {
-  return score >= 70 ? "high" : score >= 40 ? "mid" : "low";
-}
+/** Short enough for a tooltip; the detail pane says it in full. */
+const ZEROED_LABEL: Record<NonNullable<ListedFinding["zeroedBy"]>, string> = {
+  disqualified: "the model disqualified it",
+  relevance: "relevance 0",
+  welcome: "welcome 0",
+};
 
 /**
  * One finding in the list, read in a glance: the score in a box of its own, the
  * title, then where and how old, and the operator's note marked as theirs.
  */
 export function FindingRow({
-  row: { finding, assessment, note, drafts, score, latestScan },
+  row: { finding, assessment, note, drafts, score, zeroedBy, latestScan },
   selected,
   hidden,
   showProject,
@@ -37,7 +40,14 @@ export function FindingRow({
           ·
         </span>
       ) : assessment ? (
-        <span className={`score ${scoreClass(score)}`}>{score}</span>
+        // A number, not a grade: no colour bands, since no threshold is
+        // calibrated. Only a zero a rule forced is marked, and says which.
+        <span
+          className={zeroedBy ? "score zeroed" : "score"}
+          title={zeroedBy ? `Zero by rule: ${ZEROED_LABEL[zeroedBy]}` : undefined}
+        >
+          {score}
+        </span>
       ) : (
         <span className="score" title="Not assessed">
           –

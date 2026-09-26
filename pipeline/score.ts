@@ -77,19 +77,25 @@ export interface ScoreExplanation {
   score: number;
 }
 
+/**
+ * The hard zero that applies, the first in the order `score` checks them; null
+ * when none does. Independent of the clock, so a list can say which rows are
+ * zero by rule without computing the rest.
+ */
+export function hardZero(components: ScoreComponents): ScoreExplanation["zeroedBy"] {
+  if (components.disqualified) return "disqualified";
+  if (components.relevance === 0) return "relevance";
+  if (components.welcome === 0) return "welcome";
+  return null;
+}
+
 /** `score`, with its working: the one computation both the rank and the inbox read. */
 export function explain(
   components: ScoreComponents,
   publishedAt: Date | null | undefined,
   now = new Date(),
 ): ScoreExplanation {
-  const zeroedBy = components.disqualified
-    ? "disqualified"
-    : components.relevance === 0
-      ? "relevance"
-      : components.welcome === 0
-        ? "welcome"
-        : null;
+  const zeroedBy = hardZero(components);
 
   // Unclamped. `AssessmentSchema` accepts only integers 0-5, and every stored
   // row came through it, so a value outside that range is a bug in this program

@@ -207,6 +207,9 @@ button:disabled {
 
 /* A real button, so it is focusable and announced — but shaped like a row. */
 .item {
+  /* The containing block for its screen-reader text, which would otherwise
+     hang at its place in the scrolled list and stretch the page. */
+  position: relative;
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);
   gap: 12px;
@@ -269,11 +272,12 @@ button:disabled {
 .item .meta > * {
   flex: none;
 }
-/* A zero basis, so the rest of the line fits before the venue claims space;
-   it then grows back to its own width and wraps only below 10ch. */
+/* A 10ch basis, clamped to its own width when shorter, so the rest of the
+   line fits beside it; it then grows back to its full width, and shortens
+   before the line wraps. */
 .item .meta .venue {
-  flex: 1 1 0;
-  min-width: min(10ch, 100%);
+  flex: 1 1 10ch;
+  min-width: 0;
   max-width: max-content;
   overflow: hidden;
   white-space: nowrap;
@@ -295,14 +299,12 @@ button:disabled {
   font-weight: 700;
   text-align: right;
 }
-.score.high {
-  color: var(--good);
+/* The one mark a score carries: a zero a rule forced, named in its title. */
+.score.zeroed {
+  color: var(--bad);
 }
-.score.mid {
-  color: var(--mid);
-}
-.score.low {
-  color: var(--muted);
+.item > .score.zeroed {
+  border-color: var(--bad);
 }
 
 .flag {

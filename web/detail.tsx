@@ -14,7 +14,6 @@ import {
 } from "../vocabulary";
 import type { ScoreExplanation } from "../pipeline/score";
 import { type FindingDetail, type TriageOptions, messageOf, requestJson, postJson } from "./api";
-import { scoreClass } from "./finding-row";
 import { isShortcut } from "./keyboard";
 import { ActionBar } from "./action-bar";
 
@@ -390,7 +389,7 @@ export function Detail({
                   >
                     SCORE · CODE
                   </span>
-                  <b className={`score ${scoreClass(score)}`}>
+                  <b className={breakdown?.zeroedBy ? "score zeroed" : "score"}>
                     {score}
                     <span className="of">/100</span>
                   </b>

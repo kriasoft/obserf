@@ -14,6 +14,8 @@ interface FindingView {
 export type ListedFinding = FindingView & {
   drafts: number;
   score: number;
+  /** The hard rule that zeroed the score; null when none did. */
+  zeroedBy: ScoreExplanation["zeroedBy"];
   latestScan: LatestScanMark | null;
 };
 
