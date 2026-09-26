@@ -56,7 +56,7 @@ pipeline/
   assess.ts          One structured model call per candidate
   score.ts           Components → 0-100, pure
   rescore.ts         Re-runs score over stored components; no model
-  draft-context.ts   Draft-time thread fetch (plain HTTP, no browser)
+  draft-context.ts   Draft-time context fetch (plain HTTP, no browser)
   draft.ts           Comment/reply/submission generation
 web/
   server.ts          Bun.serve with routes and HTML import
@@ -102,7 +102,11 @@ Only successfully assessed gate survivors reach storage; rejected candidates ref
 
 **Triage.** Both `obserf triage` and the inbox call `setTriage`: a string note replaces the stored value, `null` clears it, and `undefined` preserves it. The HTTP route trims strings and converts an empty string to `null`; the CLI passes `--note` through unchanged. The inbox sends status and note through the same endpoint and serializes its writes so a note save followed by a status change lands in that order. `setTriage` returns the prior status for reporting and the inbox’s single-level undo, which leaves notes untouched. Its read and write are separate statements, so the prior status is not an atomic snapshot if another process writes concurrently.
 
-**Draft.** Separate from the scan and initiated by the operator. Before writing, `draft-context.ts` fetches the thread as it stands — Hacker News through Algolia's item API, everything else as HTML with tags stripped. Assessment uses discovery text and any enrichment, which do not necessarily include the current conversation; fetching here rather than during a scan keeps the cost proportionate, since a scan touches a hundred candidates and drafting touches the one or two the operator chose. A dead or removed page also surfaces at the moment it matters.
+**Draft.** Separate from the scan and initiated by the operator. Before writing, `draft-context.ts` fetches the source as it stands — Hacker News through Algolia's item API, GitHub issues, pull requests and repository READMEs through GitHub's REST API, everything else as HTML with tags stripped. Assessment uses discovery text and any enrichment, which do not necessarily include the current conversation; fetching here rather than during a scan keeps the cost proportionate, since a scan touches a hundred candidates and drafting touches the one or two the operator chose. A dead or removed page also surfaces at the moment it matters.
+
+The route is chosen by URL, not by `sourceId`: a GitHub issue Brave found is still a GitHub issue. A venue with an API is read through it because tag stripping keeps a site's navigation alongside its content — a GitHub issue read that way spends its first two thousand characters on GitHub's menu. A shape whose endpoint would have to be guessed falls through to the page fetch: the wrong resource presented as the thread is worse than a noisy copy of the right one.
+
+Every route reports what limits its context — a truncated thread, comments past the first page, a README standing in for a whole repository, a page whose navigation could not be told apart from its content — and that warning reaches the model and, when the draft is generated, the operator; it is not stored with the draft. A partial read presented as a whole one is how a confident reply to the wrong question gets written.
 
 ## Schema
 

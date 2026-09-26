@@ -435,13 +435,13 @@ async function runDraft(idArg: string | undefined, kindArg: string | undefined) 
 
   const result = await generateDraft(project, view.finding, kind, view.assessment?.reason);
   console.log(`${bold(`Draft (${kind}) for #${view.finding.id}`)} ${dim(view.finding.url)}`);
-  console.log(
-    dim(
-      result.contextVia
-        ? `read the live thread (${result.contextVia})\n`
-        : `could not read the live thread${result.contextWarning ? `: ${result.contextWarning}` : ""} — worked from the stored excerpt\n`,
-    ),
-  );
+  // The warning prints whether or not context was retrieved: partial context and
+  // none are different risks. Only a complete read is dimmed.
+  const provenance = result.contextVia
+    ? `fetched live (${result.contextVia})`
+    : "could not fetch it live, so this is from the stored excerpt";
+  const line = `${provenance}${result.contextWarning ? `: ${result.contextWarning}` : ""}\n`;
+  console.log(result.contextVia && !result.contextWarning ? dim(line) : line);
   console.log(result.body);
   console.log(`\n${venueReminder(view.finding, project)}`);
 }

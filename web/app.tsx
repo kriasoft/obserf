@@ -746,10 +746,15 @@ function Detail({
           {/* Another client may have generated a newer draft before this reload;
               retrieval context belongs to the returned id, not list position. */}
           {provenance?.id === d.id && (
-            <p className={provenance.contextVia ? "muted small" : "warn small"}>
-              {provenance.contextVia
-                ? `written from the live thread (${provenance.contextVia})`
-                : `written from the stored excerpt only${provenance.contextWarning ? ` — ${provenance.contextWarning}` : ""}`}
+            <p
+              className={
+                provenance.contextVia && !provenance.contextWarning ? "muted small" : "warn small"
+              }
+            >
+              {(provenance.contextVia
+                ? `written from content fetched live (${provenance.contextVia})`
+                : "written from the stored excerpt only") +
+                (provenance.contextWarning ? ` — ${provenance.contextWarning}` : "")}
             </p>
           )}
           {d.body}
