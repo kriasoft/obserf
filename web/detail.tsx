@@ -456,6 +456,45 @@ export function Detail({
               <EarlierVerdicts earlier={earlier} current={assessment.promptFingerprint} />
             </>
           )}
+          {/* Identity, not judgment, so it stays while judgment is hidden.
+              Collapsed: the header already names the finding for reading, and
+              these are for acting on it elsewhere — `obserf show`, the address. */}
+          <details className="metadata">
+            <summary>Metadata</summary>
+            <dl className="facts">
+              <div>
+                <dt>Finding</dt>
+                <dd>
+                  <code>#{finding.id}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>URL</dt>
+                <dd className="url">{finding.url}</dd>
+              </div>
+              <div>
+                <dt>Source</dt>
+                <dd>{finding.sourceId}</dd>
+              </div>
+              <div>
+                <dt>Published</dt>
+                <dd>
+                  {finding.publishedAt
+                    ? new Date(finding.publishedAt).toLocaleString()
+                    : "not reported by the source"}
+                </dd>
+              </div>
+              <div>
+                <dt>First found</dt>
+                <dd>
+                  {new Date(finding.discoveredAt).toLocaleString()}
+                  {finding.firstRunId !== null && (
+                    <span className="sub">by scan run #{finding.firstRunId}</span>
+                  )}
+                </dd>
+              </div>
+            </dl>
+          </details>
         </aside>
       </div>
       <ActionBar
