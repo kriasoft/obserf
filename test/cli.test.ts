@@ -3,7 +3,14 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clipped, colourable, describeSources, listArg, wrapped } from "../cli";
+import {
+  clipped,
+  colourable,
+  describeSources,
+  listArg,
+  venueUnlessRedundant,
+  wrapped,
+} from "../cli";
 import { migrate } from "../db/migrate";
 
 /**
@@ -226,6 +233,102 @@ describe("a stored draft, re-read", () => {
     expect(code).not.toBe(0);
     expect(stdout).not.toContain("a draft body");
     expect(output).toContain("venueGuidance");
+  });
+});
+
+/**
+ * `obserf show` is where a verdict is diagnosed (docs/product/evaluation.md), so
+ * each line it prints is a claim about the record, and each has a state in which
+ * printing it would be false.
+ */
+describe("a finding read back", () => {
+  /** A finding with no assessment, triage row or scan behind it, ready for more rows. */
+  function bareFinding(): { root: string; handle: Database } {
+    const root = workspace();
+    mkdirSync(join(root, ".obserf"), { recursive: true });
+    const handle = new Database(join(root, ".obserf", "obserf.db"), { create: true });
+    migrate(handle);
+    handle
+      .query(
+        "INSERT INTO findings (project, source_id, url, title, venue, author, is_thread_comment, discovered_at, first_run_id) VALUES (?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        "p",
+        "hn",
+        "https://news.ycombinator.com/item?id=1",
+        "T",
+        "news.ycombinator.com",
+        null,
+        null,
+        0,
+        null,
+      );
+    return { root, handle };
+  }
+
+  test("prints every verdict with what produced it, newest first", async () => {
+    const { root, handle } = bareFinding();
+    handle.run(
+      "INSERT INTO runs (project, started_at, sources) VALUES ('p', 0, '[]'), ('p', 0, '[]')",
+    );
+    handle.run("UPDATE findings SET author = 'alice', is_thread_comment = 1, first_run_id = 2");
+    const assess = handle.query(
+      "INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent, welcome, reach, opportunity, disqualified, reason, score, created_at) VALUES (1,?,?,?,?,?,?,'thread',?,?,?,0)",
+    );
+    assess.run("model-a", "fp-old", 4, 4, 1, 3, 1, "old reason", 0);
+    assess.run("model-b", "fp-new", 4, 4, 4, 3, 0, "new reason", 72);
+    handle.run("INSERT INTO triage (finding_id, status) VALUES (1, 'shortlisted')");
+    handle.run(
+      "INSERT INTO drafts (finding_id, kind, body, model, created_at) VALUES (1, 'reply', 'body', 'model-d', 0)",
+    );
+    handle.close();
+
+    const { code, output } = await run(root, "show", "1");
+    expect(code).toBe(0);
+    // The venue is the URL's host, so only the URL says it.
+    expect(output).toContain("p · hn ·");
+    expect(output).toContain("one comment inside a thread, not the thread itself · author: alice");
+    expect(output).toContain("first seen");
+    expect(output).toContain("in scan #2 · triage updated");
+    expect(output).toContain("model-b · prompt fp-new");
+    const earlier = output.slice(output.indexOf("Earlier assessments"));
+    // No score: `rescore` would have rewritten it. The flag leads, since none of
+    // the components shows it.
+    expect(earlier).toContain("  disqualified · relevance 4 · intent 4 · welcome 1 · reach 3");
+    expect(earlier).toContain("snapshots not kept");
+    expect(earlier).toContain("model-a · prompt fp-old");
+    expect(earlier).toContain("thread — old reason");
+    expect(earlier).not.toContain("fp-new");
+    // A draft names its own model, which need not be the verdict's.
+    expect(output).toContain("model-d");
+  });
+
+  test("claims nothing the record does not hold", async () => {
+    const { root, handle } = bareFinding();
+    handle.close();
+    const { code, output } = await run(root, "show", "1");
+    expect(code).toBe(0);
+    expect(output).toContain("No assessment recorded.");
+    // Neither a missing verdict nor an unclassified shape becomes a claim.
+    expect(output).not.toContain("Score ");
+    expect(output).not.toContain("one comment inside a thread");
+    expect(output).toContain("first seen");
+    expect(output).not.toContain("in scan #");
+    // Without a triage row the status falls back to `new`, which dates nothing.
+    expect(output).not.toContain("triage updated");
+    expect(output).not.toContain("author:");
+    expect(output).not.toContain("Earlier assessments");
+  });
+
+  /** A note written while leaving the status `new` moves the timestamp, but rules nothing. */
+  test("dates no decision while the status is still new", async () => {
+    const { root, handle } = bareFinding();
+    handle.run("INSERT INTO triage (finding_id, status, note) VALUES (1, 'new', 'look again')");
+    handle.close();
+    const { code, output } = await run(root, "show", "1");
+    expect(code).toBe(0);
+    expect(output).toContain("look again");
+    expect(output).not.toContain("triage updated");
   });
 });
 
@@ -460,6 +563,41 @@ describe("input rejected before the database opens", () => {
     expect(code).not.toBe(0);
     expect(output).toContain(message);
     expect(existsSync(join(root, ".obserf"))).toBe(false);
+  });
+});
+
+/** For most findings the venue only repeats the URL, and the URL is what gets opened. */
+describe("venueUnlessRedundant", () => {
+  test("drops a redundant host-qualified venue", () => {
+    expect(venueUnlessRedundant("github.com/o/list", "https://github.com/o/list")).toBeNull();
+    expect(
+      venueUnlessRedundant("news.ycombinator.com", "https://news.ycombinator.com/item?id=1"),
+    ).toBeNull();
+    expect(venueUnlessRedundant("example.com", "https://www.example.com/a/b")).toBeNull();
+    expect(
+      venueUnlessRedundant("github.com/o/list", "https://github.com/o/list/issues/1"),
+    ).toBeNull();
+  });
+
+  /**
+   * The case the whole rule exists for: `r/golang` is a substring of the URL, but
+   * it is the compact name of the place, so a substring test would throw away
+   * the one venue label that is worth reading.
+   */
+  test("keeps a path-only venue label", () => {
+    const url = "https://www.reddit.com/r/golang/comments/abc/whats_good";
+    expect(venueUnlessRedundant("r/golang", url)).toBe("r/golang");
+  });
+
+  /** A prefix has to end at a segment boundary, or a sibling swallows it. */
+  test("does not let one path swallow its neighbour", () => {
+    expect(venueUnlessRedundant("github.com/o/list", "https://github.com/o/list-next")).toBe(
+      "github.com/o/list",
+    );
+  });
+
+  test("an unparseable URL settles nothing, so the venue stays", () => {
+    expect(venueUnlessRedundant("somewhere", "not a url")).toBe("somewhere");
   });
 });
 

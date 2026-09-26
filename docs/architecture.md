@@ -124,7 +124,7 @@ Every route reports what limits its context — a truncated thread, comments pas
 | `triage` | `scan` initializes; operator updates | Operator decisions survive rescans | `finding_id` (unique) |
 | `drafts` | `draft` | Append-only | `finding_id` |
 
-The separation is [ADR-002](adr/002-evidence-judgment-decision.md). Reading "the current state of a finding" therefore means joining its latest assessment and its triage row — done once in `latestFindings()` in `db/index.ts` rather than reconstructed per caller.
+The separation is [ADR-002](adr/002-evidence-judgment-decision.md). Reading "the current state of a finding" therefore means joining its latest assessment and its triage row — done in `db/index.ts`, by `latestFindings()` for a ranked list and `findingById()` for one finding, through the same latest-assessment subquery, rather than reconstructed per caller.
 
 ## Model use
 

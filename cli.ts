@@ -24,6 +24,7 @@ import {
 import {
   databasePath,
   draftsFor,
+  earlierAssessments,
   findingById,
   latestFindings,
   prepareDatabase,
@@ -32,7 +33,8 @@ import {
   storedProjects,
 } from "./db";
 import { backup, backups, restore } from "./db/backup";
-import type { Finding } from "./db/schema";
+import type { Assessment, Finding } from "./db/schema";
+import { venueRuleFor, type ProjectProfile } from "./project";
 import {
   DRAFT_KINDS,
   EVERGREEN,
@@ -42,7 +44,6 @@ import {
   type SourceId,
   type TriageStatus,
 } from "./vocabulary";
-import { venueRuleFor, type ProjectProfile } from "./project";
 import { generateDraft } from "./pipeline/draft";
 import { rescore } from "./pipeline/rescore";
 import { hostOf } from "./url";
@@ -228,6 +229,30 @@ async function resolveProjectFilter(key: string | undefined): Promise<string | u
   );
 }
 
+/**
+ * The venue, or null when it only repeats the URL's host or a host-qualified
+ * path prefix (`news.ycombinator.com` beside an item under it). The URL is the
+ * part kept: it is what gets opened.
+ *
+ * Never a substring match: a path-only label like `r/golang` is the compact name
+ * worth keeping beside `reddit.com/r/golang/…`, and `github.com/o/list` is not
+ * `github.com/o/list-next`. Venues
+ * are compared as adapters write them, so an unexpected spelling keeps the venue
+ * rather than dropping it.
+ */
+export function venueUnlessRedundant(venue: string, url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return venue;
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  // The path keeps its case; only a host is case-insensitive.
+  const located = host + parsed.pathname.replace(/\/+$/, "");
+  return venue === host || venue === located || located.startsWith(`${venue}/`) ? null : venue;
+}
+
 /** How wide prose may run, or 0 when nothing is reading this on a screen. */
 function terminalWidth(): number {
   if (!process.stdout.isTTY) return 0;
@@ -324,11 +349,6 @@ function usageLine(usage: Usage): string {
     `${inputTokens + cacheReadTokens + cacheWriteTokens} in (${cacheReadTokens} cached) / ` +
     `${outputTokens} out tokens · ~$${estimatedCostUsd.toFixed(3)} at list price`
   );
-}
-
-/** `Sep 09 2026`: one date shape wherever a day is printed. */
-function day(date: Date): string {
-  return date.toDateString().slice(4);
 }
 
 function scoreColor(score: number): string {
@@ -713,7 +733,49 @@ async function runShow(idArg: string | undefined) {
   console.log(finding.url);
   console.log(
     dim(
-      `${finding.venue} · ${finding.sourceId} · ${describeAge(finding.publishedAt, assessment?.opportunity ?? null)} · status: ${status}`,
+      [
+        finding.project,
+        // The URL is directly above, so keep the venue only when it adds a label
+        // rather than repeating the host or a host-qualified path.
+        venueUnlessRedundant(finding.venue, finding.url),
+        finding.sourceId,
+        describeAge(finding.publishedAt, assessment?.opportunity ?? null),
+        `status: ${status}`,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    ),
+  );
+  // What the model is told beyond the text. `reach` is judged where a reply would
+  // appear and `welcome` on whom it is addressed to, so disagreeing with either
+  // means seeing this.
+  const candidateFacts = [
+    finding.isThreadComment ? "one comment inside a thread, not the thread itself" : "",
+    finding.author ? `author: ${finding.author}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (candidateFacts) console.log(dim(candidateFacts));
+
+  // The finding's date above is the source's; this is about obserf's own
+  // record of it. The scan number is the link to `obserf runs`, which is where
+  // what that scan searched — and what it could not — is written down.
+  console.log(
+    dim(
+      [
+        `first seen ${day(finding.discoveredAt)}`,
+        finding.firstRunId ? `in scan #${finding.firstRunId}` : "",
+        // "updated", not "dismissed on": `setTriage` refreshes the timestamp for
+        // any write, so editing a note months later moves it without the status
+        // having changed. Shown only once the operator has ruled — every finding
+        // gets a triage row on insert, so on an untouched one this dates the
+        // scan rather than a decision.
+        status !== "new" && view.triageUpdatedAt
+          ? `· triage updated ${day(view.triageUpdatedAt)}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
     ),
   );
   // Show the operator the same evidence the model received, in the same terms.
@@ -749,13 +811,29 @@ async function runShow(idArg: string | undefined) {
   }
 
   if (assessment) {
-    console.log(
-      `\n${bold(`Score ${assessment.score}`)}  ${dim(
-        `relevance ${assessment.relevance} · intent ${assessment.intent} · welcome ${assessment.welcome} · reach ${assessment.reach}`,
-      )}`,
-    );
+    console.log(`\n${bold(`Score ${assessment.score}`)}  ${dim(components(assessment))}`);
     console.log(wrapped(`${assessment.opportunity ?? "?"} — ${assessment.reason}`, ""));
     if (assessment.disqualified) console.log(red("Disqualified by the model."));
+    console.log(dim(provenance(assessment)));
+
+    // The fingerprints show whether the prompt changed between verdicts; the
+    // evidence each earlier one saw was not kept, so they cannot say why a verdict
+    // moved. No score: `rescore` rewrites historical scores with the current
+    // weights and clock.
+    const earlier = earlierAssessments(finding.id, assessment.id);
+    if (earlier.length) {
+      console.log(`\n${bold("Earlier assessments")} ${dim("(of snapshots not kept)")}`);
+      for (const row of earlier) {
+        // First, since the components alone neither imply it nor rule it out.
+        const flag = row.disqualified ? `${red("disqualified")} · ` : "";
+        console.log(`  ${flag}${dim(components(row))}`);
+        console.log(`      ${dim(provenance(row))}`);
+        console.log(dim(wrapped(`${row.opportunity ?? "?"} — ${row.reason}`, "      ")));
+      }
+    }
+  } else {
+    // Not dimmed: missing judgment is not secondary metadata.
+    console.log("\nNo assessment recorded.");
   }
 
   // Indented under the label, like the list's. The draft below is deliberately
@@ -765,14 +843,6 @@ async function runShow(idArg: string | undefined) {
   // `plainText` has already collapsed the source's own line breaks, so without
   // this the excerpt is one 800-character paragraph against the margin.
   if (finding.excerpt) console.log(`\n${dim(wrapped(finding.excerpt.slice(0, 800), ""))}`);
-
-  const drafts = draftsFor(finding.id);
-  const profiles = drafts.length ? await loadProjectsIfAny() : [];
-
-  for (const draft of drafts) {
-    console.log(`\n${bold(`Draft (${draft.kind})`)} ${dim(draft.createdAt.toISOString())}`);
-    console.log(draft.body);
-  }
 
   // Under a stored draft as much as under a freshly written one, which is what
   // the inbox already does: this is the surface an operator re-reads a draft on
@@ -786,10 +856,35 @@ async function runShow(idArg: string | undefined) {
   // every profile module — and tolerantly, because reading a finding back must
   // survive the retirement of the profile that produced it, including the last
   // one in the workspace.
+  const drafts = draftsFor(finding.id);
+  const profiles = drafts.length ? await loadProjectsIfAny() : [];
+
+  for (const draft of drafts) {
+    console.log(
+      `\n${bold(`Draft (${draft.kind})`)} ${dim(`${day(draft.createdAt)} · ${draft.model}`)}`,
+    );
+    console.log(draft.body);
+  }
+
   if (drafts.length) {
     const project = profiles.find((p) => p.key === finding.project);
     console.log(`\n${venueReminder(finding, project)}`);
   }
+}
+
+/** The four judgments, phrased identically wherever an assessment is printed. */
+function components(assessment: Assessment): string {
+  return `relevance ${assessment.relevance} · intent ${assessment.intent} · welcome ${assessment.welcome} · reach ${assessment.reach}`;
+}
+
+/** Which model and which prompt produced a verdict, for judging a prompt change. */
+function provenance(assessment: Assessment): string {
+  return `assessed ${day(assessment.createdAt)} · ${assessment.model} · prompt ${assessment.promptFingerprint}`;
+}
+
+/** `Sep 09 2026`, the same shape `obserf runs` prints. */
+function day(date: Date): string {
+  return date.toDateString().slice(4);
 }
 
 async function runDraft(idArg: string | undefined, kindArg: string | undefined) {

@@ -8,7 +8,7 @@
 
 import { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { union } from "drizzle-orm/sqlite-core";
 import * as schema from "./schema";
@@ -96,6 +96,11 @@ export interface FindingView {
   note: string | null;
 }
 
+interface FindingDetail extends FindingView {
+  /** When the triage row was last written, for any reason. Null only without a row. */
+  triageUpdatedAt: Date | null;
+}
+
 /**
  * A row of the ranked list. `drafts` is a count rather than the drafts
  * themselves: the list needs to show which findings have already been drafted,
@@ -174,25 +179,58 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
   }));
 }
 
-export function findingById(id: number): FindingView | undefined {
-  const finding = db.select().from(schema.findings).where(eq(schema.findings.id, id)).get();
-  if (!finding) return undefined;
-
-  const assessment = db
-    .select()
-    .from(schema.assessments)
-    .where(eq(schema.assessments.findingId, id))
-    .orderBy(desc(schema.assessments.id))
+/**
+ * One statement, so the snapshot and the verdict are read from one database
+ * snapshot: a scan writes both in one transaction, and separate reads could pair
+ * the old snapshot with the new verdict.
+ */
+export function findingById(id: number): FindingDetail | undefined {
+  const latest = latestAssessmentIds(db);
+  const row = db
+    .select({
+      finding: schema.findings,
+      assessment: schema.assessments,
+      status: schema.triage.status,
+      triageUpdatedAt: schema.triage.updatedAt,
+      note: schema.triage.note,
+    })
+    .from(schema.findings)
+    .leftJoin(latest, eq(latest.findingId, schema.findings.id))
+    .leftJoin(schema.assessments, eq(schema.assessments.id, latest.assessmentId))
+    .leftJoin(schema.triage, eq(schema.triage.findingId, schema.findings.id))
+    .where(eq(schema.findings.id, id))
     .get();
-
-  const row = db.select().from(schema.triage).where(eq(schema.triage.findingId, id)).get();
+  if (!row) return undefined;
 
   return {
-    finding,
-    assessment: assessment ?? null,
-    status: row?.status ?? "new",
-    note: row?.note ?? null,
+    finding: row.finding,
+    assessment: row.assessment,
+    status: row.status ?? "new",
+    triageUpdatedAt: row.triageUpdatedAt ?? null,
+    note: row.note ?? null,
   };
+}
+
+/**
+ * A finding's assessments older than `beforeAssessmentId`, newest first. Bounded by the
+ * current verdict's id so one a scan writes after it was read is never filed as
+ * earlier.
+ */
+export function earlierAssessments(
+  findingId: number,
+  beforeAssessmentId: number,
+): schema.Assessment[] {
+  return db
+    .select()
+    .from(schema.assessments)
+    .where(
+      and(
+        eq(schema.assessments.findingId, findingId),
+        lt(schema.assessments.id, beforeAssessmentId),
+      ),
+    )
+    .orderBy(desc(schema.assessments.id))
+    .all();
 }
 
 /**

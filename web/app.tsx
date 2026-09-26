@@ -704,12 +704,24 @@ function Detail({
         {finding.project} · {finding.venue} · {finding.sourceId} ·{" "}
         {finding.publishedAt ? new Date(finding.publishedAt).toDateString() : "date unknown"} ·{" "}
         {status}
+        {/* What the model is told beyond the text; bears on `reach` and `welcome`. */}
+        {(finding.isThreadComment || finding.author) && (
+          <>
+            <br />
+            {[
+              finding.isThreadComment ? "one comment inside a thread, not the thread itself" : "",
+              finding.author ? `author: ${finding.author}` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </>
+        )}
       </p>
 
       {finding.repository && <Repository facts={finding.repository} />}
       {finding.metrics && <Engagement metrics={finding.metrics} />}
 
-      {assessment && (
+      {assessment ? (
         <>
           <div className="components">
             {/* Scales spelled out: a 12 beside a 5 is unreadable otherwise. */}
@@ -741,6 +753,9 @@ function Detail({
             judged {new Date(assessment.createdAt).toLocaleString()} by {assessment.model}
           </p>
         </>
+      ) : (
+        // Not muted: a missing verdict is not secondary metadata.
+        <p className="warn">No assessment recorded.</p>
       )}
 
       <div className="actions">
