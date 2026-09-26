@@ -151,6 +151,7 @@ Use `skipped` for a good finding you will not pursue, and `dismissed` for one Ob
 | <kbd>r</kbd> | Reveal the model's judgment while **Hide judgment** is on |
 | <kbd>W</kbd> | Write the suggested draft (Shift+W; it uses model quota) |
 | <kbd>c</kbd> | Copy the newest draft |
+| <kbd>?</kbd> | Show every shortcut |
 
 Shortcuts are off while you edit a note or use a filter. Notes save when the editor loses focus. Under the filters, the inbox shows the latest scan for each project in view, and says when one skipped a source, never finished, or failed. A short list isn't a quiet week unless the latest scan actually ran. The list stops at 200 results; `200+` means narrow the filters.
 
