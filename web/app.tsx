@@ -763,6 +763,28 @@ function App() {
         </button>
       </header>
 
+      {/* Across both panes, not in the list: it changes what every finding
+          can do, and it must not scroll away with the rows. */}
+      {(projectsError || profileError) && (
+        <div className="profile-banner" role="alert">
+          {projectsError ? (
+            <>
+              <b>Could not read the profiles.</b>
+              <code>{projectsError}</code>
+              <span>Scan status is not shown until they can be read.</span>
+            </>
+          ) : (
+            <>
+              <b>The profiles on disk do not load.</b>
+              <code>{profileError}</code>
+              <span>
+                The inbox is using the last ones that did, and drafting is off until they load.
+              </span>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="list">
         <p className="list-head muted small">
           <span
@@ -777,17 +799,6 @@ function App() {
           </span>
         </p>
 
-        {projectsError && (
-          <p className="error pad">
-            Could not read the profiles, so scan status is not shown — {projectsError}
-          </p>
-        )}
-        {profileError && (
-          <p className="warn pad">
-            The profiles on disk do not load, so the inbox is using the last ones that did and
-            drafting is off until they do: {profileError}
-          </p>
-        )}
         {newerScan && (
           <div className="refresh-banner" role="status">
             <span>A newer scan has been recorded since this list loaded.</span>

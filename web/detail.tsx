@@ -340,10 +340,10 @@ export function Detail({
               )}
             </p>
           )}
+          {/* The error itself is in the banner under the header; this says what
+              it means here. */}
           {profileError && (
-            <p className="warn small">
-              The profiles on disk do not load, so drafting is off until they do: {profileError}
-            </p>
+            <p className="warn small">Drafting is off until the profiles on disk load.</p>
           )}
           {!profileAvailable && !profileError && (
             <p className="warn small">
