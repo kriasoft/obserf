@@ -100,13 +100,20 @@ export function ActionBar({
             {primary && (
               <button
                 className="stacked"
-                title="Writes text for you to review. Obserf never posts."
+                title={`Draft a ${primary}: text for you to review. Obserf never posts.`}
                 aria-keyshortcuts="Shift+W"
                 disabled={drafting}
                 onClick={() => onDraft(primary)}
               >
                 <span>
-                  {drafting ? "Writing…" : `Draft ${primary}`} <kbd>⇧W</kbd>
+                  {drafting ? (
+                    "Writing…"
+                  ) : (
+                    <>
+                      Draft<span className="kind"> {primary}</span>
+                    </>
+                  )}{" "}
+                  <kbd>⇧W</kbd>
                 </span>
                 <span className="caption">uses model quota</span>
               </button>
