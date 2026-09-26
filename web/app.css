@@ -1013,3 +1013,38 @@ code {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/* Why the list is empty, or why it could not be read, in place of the rows. */
+.list-state {
+  display: grid;
+  gap: 10px;
+  padding: 28px 20px;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.list-state h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.list-state h2.error {
+  color: var(--bad);
+}
+.list-state p {
+  margin: 0;
+}
+.list-state code {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--control);
+  word-break: break-word;
+}
+.list-state .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.list-state .actions:empty {
+  display: none;
+}

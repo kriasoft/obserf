@@ -11,7 +11,7 @@ import { type ListedFinding, type TriageOptions, messageOf, requestJson, postJso
 import { TRIAGE_KEYS, isShortcut, ShortcutsDialog } from "./keyboard";
 import { ThemeToggle, applyTheme, storedTheme } from "./theme";
 import { type UndoRecord, UndoToast } from "./undo-toast";
-import { ScanStatus } from "./scan-status";
+import { SCAN_REPORT_ID, ScanStatus, summarizeScans, type ScanSummary } from "./scan-status";
 import { Detail } from "./detail";
 import { FindingRow } from "./finding-row";
 import "./app.css";
@@ -109,7 +109,10 @@ function App() {
    * rather than the ones in scope when the mutation started.
    */
   const [revision, setRevision] = useState(0);
+  /** A write that failed: a triage, a note, an undo, a category. */
   const [error, setError] = useState<string | null>(null);
+  /** The list could not be read; separate, since Retry rereads and a write it cannot redo. */
+  const [listError, setListError] = useState<string | null>(null);
   /**
    * The last status change, so a mis-keystroke is recoverable. One level and in
    * memory only: this exists because `d` is one key away from `s` and the row
@@ -256,6 +259,7 @@ function App() {
         const rows = await requestJson<ListedFinding[]>(`/api/findings?${params}`);
         if (ticket !== listTicket.current) return;
         setItems(rows);
+        setListError(null);
         setError(null);
         setSelectedId(
           (current) =>
@@ -264,7 +268,7 @@ function App() {
             ) ?? null,
         );
       } catch (cause) {
-        if (ticket === listTicket.current) setError(messageOf(cause));
+        if (ticket === listTicket.current) setListError(messageOf(cause));
       }
     })();
   }, [project, status, withZeros, revision]);
@@ -293,9 +297,11 @@ function App() {
         setCounts(null);
         setCountsError(messageOf(cause));
       });
-    // `status` too: opening a tab reloads the list, and its count must be as fresh.
-    // Not `withZeros`: both counts arrive together, and the toggle picks between them.
-  }, [project, status, revision]);
+    // Everything that reloads the list reloads these, so both describe one
+    // snapshot. Both counts arrive together, so `withZeros` needs no new query,
+    // but it reloads the list, and a scan landing since would show rows the
+    // cached counts do not include.
+  }, [project, status, withZeros, revision]);
 
   // Reloaded with the list, not only on a project change, so a scan that finished
   // meanwhile leaves no stale warning. A separate request: each is usable when
@@ -722,6 +728,7 @@ function App() {
             drafting is off until they do: {profileError}
           </p>
         )}
+        {listError && <ListError error={listError} stale={items !== null} onRetry={changed} />}
         {error && <p className="error pad">{error}</p>}
 
         {items?.map((row) => (
@@ -735,19 +742,37 @@ function App() {
           />
         ))}
 
-        {!error && !items && <p className="muted pad">Loading…</p>}
+        {!listError && !items && <p className="muted pad">Loading…</p>}
         {items?.length === 0 && (
-          <p className="muted pad">
-            No {status} findings{project ? " for this project" : ""}
-            {withZeros ? "" : " scoring above zero"}.
-          </p>
+          <EmptyList
+            status={status}
+            projectName={
+              project ? (projects?.find((p) => p.key === project)?.name ?? project) : null
+            }
+            withZeros={withZeros}
+            zeroCount={counts?.[status].zero ?? null}
+            onShowZeros={() => setWithZeros(true)}
+            scans={
+              scanError
+                ? { unknown: "the scan record could not be read", report: true }
+                : projectsError
+                  ? { unknown: "the profiles could not be read", report: false }
+                  : scans && requiredScanProjects
+                    ? { summary: summarizeScans(scans, requiredScanProjects) }
+                    : null
+            }
+          />
         )}
       </div>
 
       <div className="detail-column">
         <div className="detail" ref={pane}>
           {selectedId === null ? (
-            <p className="muted">Select a finding.</p>
+            <p className="muted">
+              {items?.length === 0
+                ? "Nothing to open. The list says why it is empty."
+                : "Select a finding."}
+            </p>
           ) : (
             // Keyed so switching findings remounts: without it the previous
             // finding stays rendered while the next loads, and the buttons
@@ -775,6 +800,117 @@ function App() {
         )}
       </div>
       <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+    </div>
+  );
+}
+
+/**
+ * An empty list says why it is empty, because an empty inbox otherwise reads as
+ * a quiet week: which filter is holding findings back, and whether the scans
+ * behind it saw everything.
+ */
+function EmptyList({
+  status,
+  projectName,
+  withZeros,
+  zeroCount,
+  onShowZeros,
+  scans,
+}: {
+  status: TriageStatus;
+  /** Null when every project is in view. */
+  projectName: string | null;
+  withZeros: boolean;
+  /** Zero-scored findings in this tab; null while unknown. */
+  zeroCount: number | null;
+  onShowZeros: () => void;
+  /** The scans' completeness, or why it is unknown; null while still loading. */
+  /** `report`: whether the header has a scan report to open. */
+  scans: { summary: ScanSummary | null } | { unknown: string; report: boolean } | null;
+}) {
+  const scope = projectName ? ` for ${projectName}` : "";
+  const hiding = !withZeros && zeroCount !== 0;
+  // Only `new` is filled by scans; the other tabs hold the operator's decisions.
+  const scanned = status === "new";
+  return (
+    <div className="list-state">
+      <h2>
+        No {status} findings{hiding ? " above score 0" : ""}
+        {scope}.
+      </h2>
+      {hiding && zeroCount !== null && (
+        <p>
+          {zeroCount} zero-score finding{zeroCount === 1 ? " is" : "s are"} hidden.
+        </p>
+      )}
+      {!hiding &&
+        (status === "new" ? (
+          <p>Every finding has been decided, or the scans found nothing new.</p>
+        ) : (
+          <p>
+            Nothing is marked {status}
+            {scope}.
+          </p>
+        ))}
+      {scanned &&
+        (scans === null ? (
+          <p>Checking whether the scans saw everything…</p>
+        ) : "unknown" in scans ? (
+          <p className="warn">Whether the scans saw everything is unknown: {scans.unknown}.</p>
+        ) : scans.summary?.problems.length ? (
+          <p className="warn">
+            The scans behind this list had problems ({scans.summary.problems.join(", ")}), so
+            findings may be missing.
+          </p>
+        ) : (
+          scans.summary && <p>{scans.summary.when}; every selected source ran.</p>
+        ))}
+      <div className="actions">
+        {hiding && zeroCount !== null && (
+          <button type="button" onClick={onShowZeros}>
+            Show zero scores
+          </button>
+        )}
+        {/* Only where the pill, and so the report, exists. */}
+        {scanned && scans && ("summary" in scans ? scans.summary : scans.report) && (
+          <button type="button" popoverTarget={SCAN_REPORT_ID}>
+            View scan
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The list could not be read. Without rows nothing is known about the queue;
+ * with rows from an earlier read, they are shown but no longer current.
+ */
+function ListError({
+  error,
+  stale,
+  onRetry,
+}: {
+  error: string;
+  stale: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="list-state" role="alert">
+      <h2 className="error">
+        {stale ? "Couldn't refresh the findings list" : "Couldn't read the findings list"}
+      </h2>
+      <code>{error}</code>
+      <p>
+        {stale
+          ? "The rows below are from the last read that worked."
+          : "Nothing is known about this queue until it can be read."}
+      </p>
+      <div className="actions">
+        <button type="button" onClick={onRetry}>
+          Retry
+        </button>
+      </div>
     </div>
   );
 }

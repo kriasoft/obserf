@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { Run } from "../db/schema";
 
 /**
@@ -21,17 +21,55 @@ export function ScanStatus({
   /** Name each scan's project, when the list is not filtered to one. */
   showProject: boolean;
 }) {
-  const reportId = useId();
   // Said rather than swallowed: the completeness warnings below are the reason
   // this exists, so their absence must not be readable as "all clear".
   if (error) {
     return (
-      <Pill reportId={reportId} tone="bad" label="Scan record unreadable">
+      <Pill tone="bad" label="Scan record unreadable">
         <p className="warn">Could not read the scan record — {error}</p>
       </Pill>
     );
   }
   if (!runs || !requiredProjects) return null;
+  const summary = summarizeScans(runs, requiredProjects);
+  if (!summary) return null;
+  const { when, problems, total, tone, shown, unscanned } = summary;
+
+  return (
+    <Pill
+      tone={tone}
+      // One problem is named; more are counted, or the pill crowds the filters
+      // out of the header. The report and the title carry every one.
+      label={[when, ...(problems.length > 1 ? [`${total} problems`] : problems)].join(" · ")}
+      title={[when, ...problems].join(" · ")}
+    >
+      <ScanReport shown={shown} unscanned={unscanned} showProject={showProject} />
+    </Pill>
+  );
+}
+
+/** The report's one id, so a "View scan" elsewhere opens the same popover. */
+export const SCAN_REPORT_ID = "scan-report";
+
+export interface ScanSummary {
+  /** The runs of projects in view. */
+  shown: Run[];
+  /** Projects in view with no run at all. */
+  unscanned: string[];
+  /** Each kind of incompleteness, worded for a summary line; empty when none. */
+  problems: string[];
+  /** How many problems, counted by instance rather than kind. */
+  total: number;
+  when: string;
+  tone: "good" | "mid" | "bad";
+}
+
+/**
+ * Whether the scans behind the view saw everything: the pill's summary, and the
+ * empty list's caveat, so the two can never disagree. Null when there is nothing
+ * to report on.
+ */
+export function summarizeScans(runs: Run[], requiredProjects: string[]): ScanSummary | null {
   // Only projects in view: a retired one outside the list is no more reported
   // for having a run than for lacking one.
   const shown = runs.filter((run) => requiredProjects.includes(run.project));
@@ -53,43 +91,30 @@ export function ScanStatus({
     open && `${open} unfinished`,
     skipped && `${skipped} source${skipped === 1 ? "" : "s"} skipped`,
     unrecorded && "sources not recorded",
-  ].filter(Boolean);
+  ].filter((p): p is string => typeof p === "string");
   const when =
     newest && oldest
       ? ago(newest) === ago(oldest)
         ? `Scan ${ago(newest)}`
         : `Scans ${ago(newest).replace(" ago", "")}–${ago(oldest)}`
       : "No scan";
-  const tone = failed || unscanned.length ? "bad" : problems.length ? "mid" : "good";
-
-  return (
-    <Pill
-      reportId={reportId}
-      tone={tone}
-      // One problem is named; more are counted, or the pill crowds the filters
-      // out of the header. The report and the title carry every one.
-      label={[
-        when,
-        ...(problems.length > 1
-          ? [`${failed + unscanned.length + open + skipped + unrecorded} problems`]
-          : problems),
-      ].join(" · ")}
-      title={[when, ...problems].join(" · ")}
-    >
-      <ScanReport shown={shown} unscanned={unscanned} showProject={showProject} />
-    </Pill>
-  );
+  return {
+    shown,
+    unscanned,
+    problems,
+    total: failed + unscanned.length + open + skipped + unrecorded,
+    when,
+    tone: failed || unscanned.length ? "bad" : problems.length ? "mid" : "good",
+  };
 }
 
 /** The pill and the popover it opens; Esc or a click outside closes it. */
 function Pill({
-  reportId,
   tone,
   label,
   title = label,
   children,
 }: {
-  reportId: string;
   tone: "good" | "mid" | "bad";
   label: string;
   title?: string;
@@ -100,13 +125,13 @@ function Pill({
       <button
         type="button"
         className="scan-pill"
-        popoverTarget={reportId}
+        popoverTarget={SCAN_REPORT_ID}
         data-tone={tone}
         title={title}
       >
         {label}
       </button>
-      <div id={reportId} popover="auto" className="scan-report small">
+      <div id={SCAN_REPORT_ID} popover="auto" className="scan-report small">
         {children}
       </div>
     </>
