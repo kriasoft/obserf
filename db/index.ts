@@ -329,6 +329,18 @@ function knownFindingsIn(
   );
 }
 
+/** Stored scans, newest first by id, which only increases, rather than by a clock that can move. */
+export function recentRuns(options: { project?: string; limit?: number } = {}): schema.Run[] {
+  const { project, limit = 10 } = options;
+  return db
+    .select()
+    .from(schema.runs)
+    .where(project ? eq(schema.runs.project, project) : undefined)
+    .orderBy(desc(schema.runs.id))
+    .limit(limit)
+    .all();
+}
+
 /**
  * Project keys the database holds rows for, sorted.
  *

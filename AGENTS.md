@@ -60,6 +60,7 @@ bun run obserf show <id>                                     # detail and drafts
 bun run obserf draft <id> [--kind comment|reply|submission]
 bun run obserf triage <id> <new|shortlisted|dismissed|acted>
 bun run obserf rescore [--project k]                          # recompute scores, no model calls
+bun run obserf runs [--project k] [--limit n]                 # recent scans: what ran, dropped, spent
 bun run obserf serve [--port n]                              # local review inbox
 bun run obserf init [dir]                                    # create a workspace
 bun run obserf backup                                        # snapshot the database

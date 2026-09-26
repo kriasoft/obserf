@@ -90,6 +90,7 @@ jobs:
           bun run obserf projects              # resolves `obserf` from a profile
           bun run obserf list                  # creates and migrates the database
           test -f .obserf/obserf.db
+          bun run obserf runs                  # reads the run table the migration adds
           bun run obserf backup                # snapshot and restore round-trip
           bun run obserf restore
 

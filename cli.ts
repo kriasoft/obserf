@@ -27,6 +27,7 @@ import {
   findingById,
   latestFindings,
   prepareDatabase,
+  recentRuns,
   setTriage,
   storedProjects,
 } from "./db";
@@ -38,6 +39,7 @@ import {
   TRIAGE_STATUSES,
   defaultKindFor,
   type OpportunityType,
+  type SourceId,
   type TriageStatus,
 } from "./vocabulary";
 import { venueRuleFor, type ProjectProfile } from "./project";
@@ -72,6 +74,9 @@ Usage: obserf <command> [options]
   triage <id> <status> [--note "..."]
   rescore       Recompute scores from stored components; no model calls
                   --project <key>   Restrict to one project
+  runs          Recent scans: what ran, what the gate dropped, what it spent
+                  --project <key>   Filter by project
+                  --limit <n>       Default 10
   projects      List the workspace's projects
   init [dir]    Create a workspace here, or in <dir>
   backup        Snapshot the database
@@ -103,6 +108,7 @@ const ACCEPTS = new Map<string, { flags: readonly string[]; args: number }>([
   ["draft", { flags: ["kind"], args: 1 }],
   ["triage", { flags: ["note"], args: 2 }],
   ["rescore", { flags: ["project"], args: 0 }],
+  ["runs", { flags: ["project", "limit"], args: 0 }],
   ["projects", { flags: [], args: 0 }],
   ["init", { flags: [], args: 1 }],
   // One database file, so there is nothing for `--project` to scope.
@@ -375,6 +381,8 @@ async function main(): Promise<void> {
       console.log(`Rescored ${count} assessment${count === 1 ? "" : "s"}.`);
       return;
     }
+    case "runs":
+      return runRuns(values);
     case "init":
       return runInit(positionals[0]);
     // These reach the database by path rather than by opening it, so without
@@ -498,10 +506,7 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
       },
     });
 
-    const gates = Object.entries(result.rejected)
-      .filter(([, n]) => n > 0)
-      .map(([rule, n]) => `${n} ${rule}`)
-      .join(", ");
+    const gates = gateDrops(result.rejected);
     const outcome = dryRun
       ? `${result.survivors.length} would be assessed`
       : `${result.assessed} assessed`;
@@ -601,6 +606,103 @@ async function runList(values: {
     // column. Undimmed, unlike everything around it: theirs, not the model's.
     if (note) console.log(`     ${dim("note:")} ${wrapped(note, " ".repeat(11)).trimStart()}`);
   }
+}
+
+/**
+ * Scan history. The run row is the only durable record of what a scan looked at,
+ * and evaluating a query or source change asks for exactly these numbers — the
+ * tokens spent rather than a call count inferred from candidates. See
+ * docs/product/evaluation.md.
+ */
+async function runRuns(values: { project?: string; limit?: string }) {
+  const limit = intArg("limit", values.limit, 10);
+  const project = await resolveProjectFilter(values.project);
+  const rows = recentRuns({ project, limit });
+  if (!rows.length) {
+    console.log(
+      dim(
+        project
+          ? `No scans recorded for "${project}".`
+          : "No scans recorded. Run `obserf scan` first.",
+      ),
+    );
+    return;
+  }
+
+  for (const run of rows) {
+    const when = `${day(run.startedAt)} ${run.startedAt.toTimeString().slice(0, 5)}`;
+    // A row with no `finishedAt` was never closed: either the scan is still
+    // running or the process died under it. Both differ from a scan that ended
+    // and recorded an error, which has a duration and a message.
+    const took = run.finishedAt
+      ? duration(run.finishedAt.getTime() - run.startedAt.getTime())
+      : "unfinished";
+    console.log(
+      `${dim(`#${String(run.id).padEnd(4)}`)} ${when}  ${bold(run.project.padEnd(10))} ${dim(took)}` +
+        // In words, not only in red: a redirected or NO_COLOR listing has no colour.
+        (run.error !== null ? ` ${red("failed")}` : ""),
+    );
+
+    console.log(`     ${dim(describeSources(run.sources, run.skipped))}`);
+
+    // Totals and tokens are written only when a scan is finalized, so on an open
+    // row they are the insert's zeros, not a count of nothing: "0 candidates → 0
+    // assessed" for work that did happen is the misreport this command exists to
+    // prevent.
+    if (!run.finishedAt) {
+      console.log(`     ${dim("never finished, so its counts and token usage were not recorded")}`);
+    } else if (run.gated === null) {
+      // Finalized by a discovery failure. The candidates are real, but an arrow
+      // to "0 assessed" would say they went through a gate that never ran.
+      console.log(`     ${dim(`${run.candidates} candidates · the gate did not run`)}`);
+    } else {
+      const gates = gateDrops(run.gated);
+      console.log(
+        `     ${dim(
+          `${run.candidates} candidates → ${run.assessed} assessed` +
+            (gates ? ` (dropped: ${gates})` : ""),
+        )}`,
+      );
+    }
+    // Independent of `assessed`: a scan that failed partway still spent quota.
+    const spent = run.inputTokens + run.cacheReadTokens + run.cacheWriteTokens + run.outputTokens;
+    if (spent) console.log(`     ${dim(usageLine(run))}`);
+    if (run.error) console.log(`     ${red(run.error)}`);
+  }
+}
+
+/**
+ * Null means the run never stored which sources ran, so it is reported as a
+ * selection; an empty map means every selected source ran.
+ */
+export function describeSources(
+  sources: readonly SourceId[],
+  skipped: Partial<Record<SourceId, string>> | null,
+): string {
+  if (skipped === null) return `selected ${sources.join(", ")} · no record of which ran`;
+  const ran = sources.filter((id) => !(id in skipped));
+  const missing = Object.entries(skipped).map(([id, reason]) => `${id} (${reason})`);
+  return [
+    ran.length ? `ran ${ran.join(", ")}` : "nothing ran",
+    missing.length ? `skipped ${missing.join(", ")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Nonzero gate rejections, as "3 duplicate, 10 stale". */
+function gateDrops(rejected: Record<string, number>): string {
+  return Object.entries(rejected)
+    .filter(([, n]) => n > 0)
+    .map(([rule, n]) => `${n} ${rule}`)
+    .join(", ");
+}
+
+function duration(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
 async function runShow(idArg: string | undefined) {

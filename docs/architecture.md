@@ -84,7 +84,7 @@ That connection refuses SQL writes (`query_only`) but is opened read-write, beca
 
 ## Data flow
 
-**Discover.** `scan` receives a profile and selects the profile’s default sources (all if omitted), or the explicit `--source` set, and queries available selections sequentially in registry order. Adapters normalize to `Candidate`, supply the source id, and handle their own rate limiting ([ADR-007](adr/007-sources-are-adapters.md)). If any source fails, discovery finishes attempting the others, then the scan fails before gating or assessment. Unavailable sources are reported as skips, whether the reason is a missing credential or a profile that gave that adapter no queries to send. A scan whose every selected source was unavailable fails rather than reporting zero candidates, which is what a genuinely empty search reports.
+**Discover.** `scan` receives a profile and selects the profile’s default sources (all if omitted), or the explicit `--source` set, and queries available selections sequentially in registry order. Adapters normalize to `Candidate`, supply the source id, and handle their own rate limiting ([ADR-007](adr/007-sources-are-adapters.md)). If any source fails, discovery finishes attempting the others, then the scan fails before gating or assessment. Unavailable sources are reported as skips, recorded on the run with the reason each gave, and named again in the scan's closing summary — whether the reason is a missing credential or a profile that gave that adapter no queries to send. A scan whose every selected source was unavailable fails rather than reporting zero candidates, which is what a genuinely empty search reports.
 
 **Gate.** Candidates are canonicalized and passed through seven deterministic rules, applied in this order — duplicate, settled, blocked, stale, thin, unchanged, ruled-out — with per-rule counts reported ([ADR-004](adr/004-deterministic-gates-before-the-model.md)).
 
@@ -116,7 +116,7 @@ Every route reports what limits its context — a truncated thread, comments pas
 
 | Table | Written by | Mutability | Key |
 | --- | --- | --- | --- |
-| `runs` | `scan` | Updated once at completion | `id` |
+| `runs` | `scan` | Checkpointed after discovery, finalized at completion | `id` |
 | `findings` | `scan` | Refreshed after successful assessment; `discoveredAt` fixed | unique `(project, url)` |
 | `assessments` | `scan`, `rescore` | Append-only, except the derived `score` | `finding_id` |
 | `triage` | `scan` initializes; operator updates | Operator decisions survive rescans | `finding_id` (unique) |
@@ -129,5 +129,7 @@ The separation is [ADR-002](adr/002-evidence-judgment-decision.md). Reading "the
 Obserf calls the model through the **Claude Agent SDK**, on the operator's Claude Code subscription. There is no API key ([ADR-008](adr/008-claude-code-subscription.md)). One model, `claude-opus-5`, serves both assessment and drafting, overridable with `OBSERF_MODEL`.
 
 `agent.ts` is the entire surface: `ask` for prose, `askForJson` for a schema-constrained verdict, `pool` for concurrency. Assessment goes through `askForJson`, so a malformed verdict fails before it reaches the database rather than being stored as a plausible-looking row; drafting uses `ask`, since the output is prose a human will edit.
+
+`obserf runs` reads the `runs` table back: which sources ran and which were skipped, the gate breakdown, what was assessed, and the token spend. A null `skipped` means the run never recorded which sources ran — distinct from an empty `skipped`, which says every selected source ran.
 
 Token usage is accumulated per run across every model the SDK touched — including its auxiliary calls — and stored on the `runs` row. `estimated_cost_usd` alongside it is the SDK's list-price figure, useful for comparing scans and not an invoice: on a subscription nothing is billed per call.

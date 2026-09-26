@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clipped, colourable, listArg, wrapped } from "../cli";
+import { clipped, colourable, describeSources, listArg, wrapped } from "../cli";
 import { migrate } from "../db/migrate";
 
 /**
@@ -115,6 +115,10 @@ describe("--project resolution", () => {
     const { code, output } = await run(root, "list", "--project", "p", "--min", "nope");
     expect(code).not.toBe(0);
     expect(output).toContain("--min must be an integer");
+    // `runRuns` orders its own parsing, so the list case cannot stand in for it.
+    const runs = await run(root, "runs", "--project", "p", "--limit", "nope");
+    expect(runs.code).not.toBe(0);
+    expect(runs.output).toContain("--limit must be an integer");
   });
 
   test("an empty key is refused rather than meaning every project", async () => {
@@ -222,6 +226,139 @@ describe("a stored draft, re-read", () => {
     expect(code).not.toBe(0);
     expect(stdout).not.toContain("a draft body");
     expect(output).toContain("venueGuidance");
+  });
+});
+
+/**
+ * A scan writes its totals only when it finalizes, so a row without `finishedAt`
+ * carries the insert's zeros, and "0 candidates → 0 assessed" for a scan that
+ * was killed mid-way is the misreport `obserf runs` exists to prevent.
+ */
+describe("an unfinished scan", () => {
+  test("is reported without the totals it never recorded", async () => {
+    const root = workspace();
+    mkdirSync(join(root, ".obserf"), { recursive: true });
+    const handle = new Database(join(root, ".obserf", "obserf.db"), { create: true });
+    migrate(handle);
+    handle
+      .query("INSERT INTO runs (project, started_at, sources) VALUES (?,?,?)")
+      .run("p", 0, JSON.stringify(["hn"]));
+    handle.close();
+
+    const { code, output } = await run(root, "runs");
+    expect(code).toBe(0);
+    expect(output).toContain("unfinished");
+    expect(output).toContain("never finished, so its counts and token usage were not recorded");
+    expect(output).not.toContain("0 candidates");
+  });
+});
+
+describe("a finished scan", () => {
+  /** A scan that gated 12 candidates and assessed 4, unless a row says otherwise. */
+  type RunRow = {
+    startedAt?: number;
+    project?: string;
+    gated?: string | null;
+    assessed?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    estimatedCostUsd?: number;
+    error?: string | null;
+  };
+  function workspaceWithRuns(rows: RunRow[]): string {
+    const root = workspace();
+    mkdirSync(join(root, ".obserf"), { recursive: true });
+    const handle = new Database(join(root, ".obserf", "obserf.db"), { create: true });
+    migrate(handle);
+    for (const row of rows) {
+      const {
+        startedAt = 0,
+        project = "p",
+        gated = JSON.stringify({ duplicate: 3, blocked: 0, stale: 5 }),
+        assessed = 4,
+        inputTokens = 1000,
+        outputTokens = 200,
+        estimatedCostUsd = 0.012,
+        error = null,
+      } = row;
+      handle
+        .query(
+          `INSERT INTO runs (project, started_at, finished_at, sources, skipped, candidates, gated,
+             assessed, input_tokens, output_tokens, estimated_cost_usd, error)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          project,
+          startedAt,
+          startedAt + 75,
+          JSON.stringify(["hn", "github"]),
+          "{}",
+          12,
+          gated,
+          assessed,
+          inputTokens,
+          outputTokens,
+          estimatedCostUsd,
+          error,
+        );
+    }
+    handle.close();
+    return root;
+  }
+
+  /** A failure keeps the work done before it, and says so in words as well as in red. */
+  test("prints the gate breakdown, the spend and the failure", async () => {
+    const root = workspaceWithRuns([{ assessed: 3, error: "rate limited" }]);
+    const { code, output } = await run(root, "runs");
+    expect(code).toBe(0);
+    expect(output).toContain("1m15s failed");
+    expect(output).toContain("12 candidates → 3 assessed (dropped: 3 duplicate, 5 stale)");
+    expect(output).toContain("1000 in (0 cached) / 200 out tokens · ~$0.012 at list price");
+    expect(output).toContain("rate limited");
+  });
+
+  /** `new Error("")` is recorded as an empty message, and is still a failure. */
+  test("an empty stored error still marks the run as failed", async () => {
+    const { output } = await run(workspaceWithRuns([{ error: "" }]), "runs");
+    expect(output).toContain("1m15s failed");
+  });
+
+  /** Ordered by id, so a clock moved backwards cannot bury the latest scan. */
+  test("lists the latest runs first, up to --limit", async () => {
+    const root = workspaceWithRuns([{ startedAt: 3000 }, { startedAt: 2000 }, { startedAt: 1000 }]);
+    const { output } = await run(root, "runs", "--limit", "2");
+    expect(output.indexOf("#3")).toBeGreaterThanOrEqual(0);
+    expect(output.indexOf("#3")).toBeLessThan(output.indexOf("#2"));
+    expect(output).not.toContain("#1 ");
+  });
+
+  /**
+   * What a discovery failure writes: hn returned 12 candidates, github threw, and
+   * nothing after discovery ran, so no gate counts, no assessments, no tokens.
+   */
+  test("says the gate did not run, rather than drawing an arrow through it", async () => {
+    const root = workspaceWithRuns([
+      {
+        gated: null,
+        assessed: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostUsd: 0,
+        error: "Discovery failed, so nothing was assessed — github: 502",
+      },
+    ]);
+    const { output } = await run(root, "runs");
+    expect(output).toContain("failed");
+    expect(output).toContain("12 candidates · the gate did not run");
+    expect(output).not.toContain("12 candidates →");
+    expect(output).not.toContain("out tokens");
+  });
+
+  test("--project shows only that project's runs", async () => {
+    const root = workspaceWithRuns([{ project: "p" }, { project: "q" }]);
+    const { output } = await run(root, "runs", "--project", "q");
+    expect(output).toContain("#2");
+    expect(output).not.toContain("#1 ");
   });
 });
 
@@ -469,6 +606,36 @@ describe("listArg", () => {
   test("given and empty is an error, not everything", () => {
     expect(() => listArg("status", [""])).toThrow("--status was given no value");
     expect(() => listArg("status", [" , "])).toThrow("--status was given no value");
+  });
+});
+
+/**
+ * `obserf runs` is where an operator checks whether the week was quiet or the
+ * scan was. The three states of `skipped` become three different sentences, and
+ * the one that must never be printed for a row that recorded nothing is "ran".
+ */
+describe("describeSources", () => {
+  test("names what ran and what did not, with the reason", () => {
+    expect(describeSources(["hn", "brave"], { brave: "BRAVE_API_KEY is not set" })).toBe(
+      "ran hn · skipped brave (BRAVE_API_KEY is not set)",
+    );
+  });
+
+  test("an empty skip map is the claim that everything ran", () => {
+    expect(describeSources(["hn", "github"], {})).toBe("ran hn, github");
+  });
+
+  /** Null is not empty: the run never got far enough to establish which ran. */
+  test("no record is reported as no record, not as a clean run", () => {
+    expect(describeSources(["hn", "github"], null)).toBe(
+      "selected hn, github · no record of which ran",
+    );
+  });
+
+  test("every source skipped says nothing ran", () => {
+    expect(describeSources(["brave"], { brave: "no key" })).toBe(
+      "nothing ran · skipped brave (no key)",
+    );
   });
 });
 

@@ -26,7 +26,11 @@ export const runs = sqliteTable("runs", {
    */
   skipped: text("skipped", { mode: "json" }).$type<Partial<Record<SourceId, string>>>(),
   candidates: integer("candidates").notNull().default(0),
-  /** Rejected by the deterministic gates, keyed by rule. */
+  /**
+   * Rejected by the deterministic gates, keyed by rule, zeros included. Written
+   * at finalization, so null means no counts were recorded; on a finished run,
+   * that the gate never ran, because discovery failed.
+   */
   gated: text("gated", { mode: "json" }).$type<Record<string, number>>(),
   assessed: integer("assessed").notNull().default(0),
   // Separate categories preserve cache usage and explain the list-price estimate.
@@ -165,6 +169,7 @@ export const drafts = sqliteTable(
   (t) => [index("drafts_finding").on(t.findingId, t.createdAt)],
 );
 
+export type Run = typeof runs.$inferSelect;
 export type Finding = typeof findings.$inferSelect;
 export type Assessment = typeof assessments.$inferSelect;
 export type Draft = typeof drafts.$inferSelect;
