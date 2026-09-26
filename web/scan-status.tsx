@@ -1,9 +1,12 @@
+import { useId, type ReactNode } from "react";
 import type { Run } from "../db/schema";
 
 /**
  * The latest scan of each project in view, and whether it saw everything it was
  * asked to: one that skipped sources, died halfway or failed otherwise yields an
- * inbox indistinguishable from a complete one with less in it.
+ * inbox indistinguishable from a complete one with less in it. A pill in the
+ * header that says so at a glance, opening the full report; it never scrolls
+ * away, and never pushes the findings down.
  */
 export function ScanStatus({
   runs,
@@ -18,10 +21,15 @@ export function ScanStatus({
   /** Name each scan's project, when the list is not filtered to one. */
   showProject: boolean;
 }) {
+  const reportId = useId();
   // Said rather than swallowed: the completeness warnings below are the reason
   // this exists, so their absence must not be readable as "all clear".
   if (error) {
-    return <div className="scan warn small">Could not read the scan record — {error}</div>;
+    return (
+      <Pill reportId={reportId} tone="bad" label="Scan record unreadable">
+        <p className="warn">Could not read the scan record — {error}</p>
+      </Pill>
+    );
   }
   if (!runs || !requiredProjects) return null;
   // Only projects in view: a retired one outside the list is no more reported
@@ -30,8 +38,92 @@ export function ScanStatus({
   const unscanned = requiredProjects.filter((key) => !shown.some((run) => run.project === key));
   if (!shown.length && !unscanned.length) return null;
 
+  const failed = shown.filter((run) => run.error !== null).length;
+  const open = shown.filter((run) => run.finishedAt === null).length;
+  const skipped = shown.reduce((n, run) => n + Object.keys(run.skipped ?? {}).length, 0);
+  const unrecorded = shown.filter((run) => run.skipped === null).length;
+  const ages = shown
+    .map((run) => new Date(run.startedAt))
+    .sort((a, b) => b.getTime() - a.getTime());
+  const newest = ages[0];
+  const oldest = ages.at(-1);
+  const problems = [
+    failed && `${failed} failed`,
+    unscanned.length && `${unscanned.length} never scanned`,
+    open && `${open} unfinished`,
+    skipped && `${skipped} source${skipped === 1 ? "" : "s"} skipped`,
+    unrecorded && "sources not recorded",
+  ].filter(Boolean);
+  const when =
+    newest && oldest
+      ? ago(newest) === ago(oldest)
+        ? `Scan ${ago(newest)}`
+        : `Scans ${ago(newest).replace(" ago", "")}–${ago(oldest)}`
+      : "No scan";
+  const tone = failed || unscanned.length ? "bad" : problems.length ? "mid" : "good";
+
   return (
-    <div className="scan small">
+    <Pill
+      reportId={reportId}
+      tone={tone}
+      // One problem is named; more are counted, or the pill crowds the filters
+      // out of the header. The report and the title carry every one.
+      label={[
+        when,
+        ...(problems.length > 1
+          ? [`${failed + unscanned.length + open + skipped + unrecorded} problems`]
+          : problems),
+      ].join(" · ")}
+      title={[when, ...problems].join(" · ")}
+    >
+      <ScanReport shown={shown} unscanned={unscanned} showProject={showProject} />
+    </Pill>
+  );
+}
+
+/** The pill and the popover it opens; Esc or a click outside closes it. */
+function Pill({
+  reportId,
+  tone,
+  label,
+  title = label,
+  children,
+}: {
+  reportId: string;
+  tone: "good" | "mid" | "bad";
+  label: string;
+  title?: string;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        className="scan-pill"
+        popoverTarget={reportId}
+        data-tone={tone}
+        title={title}
+      >
+        {label}
+      </button>
+      <div id={reportId} popover="auto" className="scan-report small">
+        {children}
+      </div>
+    </>
+  );
+}
+
+function ScanReport({
+  shown,
+  unscanned,
+  showProject,
+}: {
+  shown: Run[];
+  unscanned: string[];
+  showProject: boolean;
+}) {
+  return (
+    <div className="scan">
       {unscanned.map((key) => (
         <span className="warn" key={key}>
           {showProject && `${key} · `}no scan recorded

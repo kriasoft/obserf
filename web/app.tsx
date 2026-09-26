@@ -285,9 +285,14 @@ function App() {
         setCountsError(null);
       })
       .catch((cause: unknown) => {
-        if (ticket === countsTicket.current) setCountsError(messageOf(cause));
+        if (ticket !== countsTicket.current) return;
+        // The last good numbers predate the change that prompted this refresh,
+        // so they would be announced as current while wrong.
+        setCounts(null);
+        setCountsError(messageOf(cause));
       });
-  }, [project, withZeros, revision]);
+    // `status` too: opening a tab reloads the list, and its count must be as fresh.
+  }, [project, status, withZeros, revision]);
 
   // Reloaded with the list, not only on a project change, so a scan that finished
   // meanwhile leaves no stale warning. A separate request: each is usable when
@@ -631,7 +636,13 @@ function App() {
                 key={s}
                 type="button"
                 aria-pressed={s === status}
-                aria-label={n === undefined ? label : `${label}, ${n} findings`}
+                aria-label={
+                  n !== undefined
+                    ? `${label}, ${n} findings`
+                    : countsError
+                      ? `${label}, count unavailable`
+                      : label
+                }
                 onClick={() => setStatus(s)}
               >
                 {label}
@@ -641,6 +652,12 @@ function App() {
           })}
         </div>
         <span className="spacer" />
+        <ScanStatus
+          runs={scans}
+          error={scanError}
+          requiredProjects={requiredScanProjects}
+          showProject={!project}
+        />
         <label
           className="muted"
           title="Zero-scored findings, including everything the model disqualified"
@@ -691,13 +708,6 @@ function App() {
               : "…"}
           </span>
         </p>
-
-        <ScanStatus
-          runs={scans}
-          error={scanError}
-          requiredProjects={requiredScanProjects}
-          showProject={!project}
-        />
 
         {projectsError && (
           <p className="error pad">
