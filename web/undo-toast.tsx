@@ -26,6 +26,24 @@ export interface UndoRecord {
  * not the selection, which the decision has already moved on — so it stays up
  * while the operator reads the next finding, and nothing waits for it.
  */
+/** The decision in a word: "Dismissed", "Back to new". */
+function decisionLabel(undo: UndoRecord): string {
+  return undo.to === "new" ? "Back to new" : undo.to[0]!.toUpperCase() + undo.to.slice(1);
+}
+
+/**
+ * The toast in one sentence, for a live region that is mounted before it has
+ * anything to say: one that mounts with its first message is often not read.
+ * Changes with the reason and the posted location as well, since those are
+ * decisions too.
+ */
+export function announcement(undo: UndoRecord | null): string {
+  if (!undo) return "";
+  const reason = undo.category ? `, reason ${undo.category}` : "";
+  const posted = undo.posted ? `, posted at ${undo.posted}` : "";
+  return `${decisionLabel(undo)}${reason}${posted}: ${undo.title}. Press u to undo.`;
+}
+
 export function UndoToast({
   undo,
   onUndo,
@@ -40,11 +58,11 @@ export function UndoToast({
   /** Keeps the decision; only the offer to undo it, and its follow-up, go. */
   onClose: () => void;
 }) {
-  const label = undo.to === "new" ? "Back to new" : undo.to[0]!.toUpperCase() + undo.to.slice(1);
+  const label = decisionLabel(undo);
   return (
     <div className="toast" role="region" aria-label="Last decision">
       <div className="toast-head">
-        <span aria-live="polite">
+        <span>
           <span className="dot" data-status={undo.to} />
           <b>
             {label}

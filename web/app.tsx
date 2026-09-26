@@ -20,7 +20,7 @@ import {
 } from "./api";
 import { TRIAGE_KEYS, isShortcut, ShortcutsDialog } from "./keyboard";
 import { ThemeToggle, applyTheme, storedTheme } from "./theme";
-import { type UndoRecord, UndoToast } from "./undo-toast";
+import { type UndoRecord, UndoToast, announcement } from "./undo-toast";
 import { SCAN_REPORT_ID, ScanStatus, summarizeScans, type ScanSummary } from "./scan-status";
 import { Detail } from "./detail";
 import { FindingRow } from "./finding-row";
@@ -847,6 +847,12 @@ function App() {
       </div>
 
       <div className="detail-column">
+        {/* Always mounted, and empty until a decision: see `announcement`. */}
+        <p className="sr-only" aria-live="polite">
+          {/* Keyed to the record: a new node inside the region is read even
+              when its words repeat the last decision's. */}
+          <span key={undo?.seq}>{announcement(undo)}</span>
+        </p>
         <div className="detail" ref={pane}>
           {selectedId === null ? (
             <p className="muted">
