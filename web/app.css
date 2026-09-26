@@ -49,6 +49,12 @@ body {
   border-right: 1px solid var(--line);
   overflow-y: auto;
 }
+/* Holds the scrolling pane and the toast that floats over its bottom. */
+.detail-column {
+  position: relative;
+  display: grid;
+  min-height: 0;
+}
 .detail {
   overflow-y: auto;
   /* No bottom padding: the action bar is the pane's last thing, pinned there. */
@@ -309,7 +315,21 @@ a.button:hover {
   font-size: 11px;
   color: var(--muted);
 }
-/* The dot names the status in the same colour the list uses. */
+/* Each status has one colour, shared by its dot on the bar and in the toast. */
+[data-status="shortlisted"] {
+  --dot: var(--good);
+}
+[data-status="new"],
+[data-status="skipped"] {
+  --dot: var(--muted);
+}
+[data-status="dismissed"] {
+  --dot: var(--bad);
+}
+[data-status="acted"] {
+  --dot: var(--accent);
+}
+.dot,
 .decisions .stacked > :first-child::before {
   content: "";
   display: inline-block;
@@ -323,25 +343,15 @@ a.button:hover {
 .decisions .stacked .caption {
   padding-left: 14px;
 }
-.decisions .shortlisted {
-  --dot: var(--good);
-}
-.decisions .skipped {
-  --dot: var(--muted);
-}
-.decisions .dismissed {
-  --dot: var(--bad);
+.decisions [data-status="dismissed"] {
   color: var(--bad);
-}
-.decisions .acted {
-  --dot: var(--accent);
 }
 .decisions [aria-pressed="true"] {
   background: var(--selected);
   border-color: var(--line-strong);
   cursor: default;
 }
-@container detail (width < 960px) {
+@container detail (width < 900px) {
   .action-bar .caption {
     display: none;
   }
@@ -460,28 +470,6 @@ h1 {
   border: 1px solid var(--accent-bg);
 }
 
-.undo {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-}
-.undo > span {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-/* The category prompt after a dismissal: its own line under the undo row. */
-.undo > p {
-  flex-basis: 100%;
-  margin: 0;
-}
-
 /* Excerpts run to 60k characters. Above the note box it has to be bounded, or
    the note and the drafts are off the bottom of the pane. */
 .excerpt {
@@ -574,4 +562,84 @@ dialog.shortcuts kbd {
    around the whole overlay marks nothing. */
 dialog.shortcuts:focus-visible {
   outline: none;
+}
+
+/* Above the action bar when there is one; the fallback offset clears a
+   one-row bar where anchor positioning is missing, and the page bottom when no
+   finding is open. */
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  translate: -50% 0;
+  z-index: 2;
+  width: max-content;
+  max-width: min(640px, calc(100% - 48px));
+  display: grid;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
+}
+@supports (anchor-name: --a) {
+  .action-bar {
+    anchor-name: --action-bar;
+  }
+  .toast {
+    position-anchor: --action-bar;
+    bottom: anchor(top, 8px);
+    margin-bottom: 8px;
+  }
+}
+/* Room to scroll the last of the finding out from under the toast. */
+.detail-column:has(> .toast) .detail-body {
+  padding-bottom: 140px;
+}
+.toast-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.toast-head > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.toast p {
+  margin: 0;
+}
+.reasons {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.reasons button {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+  padding: 4px 8px;
+}
+.reasons button:hover:not(:disabled) {
+  border-color: var(--bad);
+}
+.posted {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.posted input {
+  flex: 1;
+  min-width: 220px;
+  font: inherit;
+  color: var(--text);
+  background: var(--control);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
 }

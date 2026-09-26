@@ -652,7 +652,7 @@ function App() {
    * already looking at the next one. Skippable — nothing waits for it.
    */
   const categorize = useCallback(
-    (category: DismissalCategory): Promise<boolean> => {
+    (category: DismissalCategory, forSeq?: number): Promise<boolean> => {
       // Queued when the digit is pressed, so a decision typed after it cannot land
       // first and replace the record it is meant for; resolved at its turn, when
       // every decision typed before it, `d`'s own write included, has landed. Not
@@ -666,6 +666,9 @@ function App() {
         if (record?.to !== "dismissed" || staleRecord.current || undoing.current === record.seq) {
           return false;
         }
+        // A click names the record its toast showed; a digit means whichever
+        // dismissal is latest by now, `d`'s own write included.
+        if (forSeq !== undefined && record.seq !== forSeq) return false;
         try {
           await postJson(`/api/findings/${record.id}/triage`, {
             status: "dismissed",
@@ -882,57 +885,6 @@ function App() {
           showProject={!project}
         />
 
-        {undo && (
-          <div className="undo">
-            <span className="muted small">
-              {undo.to}
-              {undo.category && ` (${undo.category})`} · {undo.title}
-            </span>
-            <button onClick={() => void undoLast()}>
-              undo <kbd>u</kbd>
-            </button>
-            {undo.to === "acted" &&
-              (undo.posted ? (
-                <p className="muted small">Posted: {undo.posted}</p>
-              ) : (
-                <p className="small">
-                  <input
-                    // Keyed to the record, so the next `a` starts empty.
-                    key={undo.seq}
-                    autoFocus
-                    aria-label="Where was it posted"
-                    placeholder="Where was it posted?"
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void recordPosted(event.currentTarget.value);
-                      if (event.key === "Escape") event.currentTarget.blur();
-                    }}
-                  />{" "}
-                  {/* Beside the field, not in its placeholder: typing hides a
-                      placeholder, and this is how keyboard review resumes. */}
-                  <span className="muted">
-                    <kbd>Enter</kbd> adds it to the note · <kbd>Esc</kbd> skips
-                  </span>
-                </p>
-              ))}
-            {undo.to === "dismissed" && (
-              <p className="muted small">
-                {undo.category ? (
-                  FIRST_FIX[undo.category] && <>First fix: {FIRST_FIX[undo.category]}</>
-                ) : (
-                  <>
-                    Why?{" "}
-                    {DISMISSAL_CATEGORIES.map((c, i) => (
-                      <span key={c}>
-                        <kbd>{i + 1}</kbd> {c}{" "}
-                      </span>
-                    ))}
-                  </>
-                )}
-              </p>
-            )}
-          </div>
-        )}
-
         {projectsError && (
           <p className="error pad">
             Could not read the profiles, so scan status is not shown — {projectsError}
@@ -1009,22 +961,33 @@ function App() {
         )}
       </div>
 
-      <div className="detail" ref={pane}>
-        {selectedId === null ? (
-          <p className="muted">Select a finding.</p>
-        ) : (
-          // Keyed so switching findings remounts: without it the previous
-          // finding stays rendered while the next loads, and the buttons
-          // already act on the next one.
-          <Detail
-            key={selectedId}
-            id={selectedId}
-            revision={revision}
-            judgmentHidden={hideJudgment && !revealed.has(selectedId)}
-            onReveal={() => reveal(selectedId)}
-            onTriage={triage}
-            onChanged={changed}
-            pendingNotes={pendingNotes}
+      <div className="detail-column">
+        <div className="detail" ref={pane}>
+          {selectedId === null ? (
+            <p className="muted">Select a finding.</p>
+          ) : (
+            // Keyed so switching findings remounts: without it the previous
+            // finding stays rendered while the next loads, and the buttons
+            // already act on the next one.
+            <Detail
+              key={selectedId}
+              id={selectedId}
+              revision={revision}
+              judgmentHidden={hideJudgment && !revealed.has(selectedId)}
+              onReveal={() => reveal(selectedId)}
+              onTriage={triage}
+              onChanged={changed}
+              pendingNotes={pendingNotes}
+            />
+          )}
+        </div>
+        {undo && (
+          <UndoToast
+            undo={undo}
+            onUndo={() => void undoLast()}
+            onCategorize={(category) => void categorize(category, undo.seq)}
+            onPosted={(where) => void recordPosted(where)}
+            onClose={() => recordUndo(null)}
           />
         )}
       </div>
@@ -1437,7 +1400,8 @@ function ActionBar({
         {DECISIONS.map(([s, label, caption]) => (
           <button
             key={s}
-            className={`stacked ${s}`}
+            className="stacked"
+            data-status={s}
             title={STATUS_MEANING[s]}
             aria-pressed={s === status}
             aria-keyshortcuts={KEY_FOR[s]?.toUpperCase()}
@@ -1522,6 +1486,98 @@ function ActionBar({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The decision just made, floating above the action bar: what it was, how to
+ * take it back, and the one follow-up it invites. Belongs to the undo record,
+ * not the selection, which the decision has already moved on — so it stays up
+ * while the operator reads the next finding, and nothing waits for it.
+ */
+function UndoToast({
+  undo,
+  onUndo,
+  onCategorize,
+  onPosted,
+  onClose,
+}: {
+  undo: UndoRecord;
+  onUndo: () => void;
+  onCategorize: (category: DismissalCategory) => void;
+  onPosted: (where: string) => void;
+  /** Keeps the decision; only the offer to undo it, and its follow-up, go. */
+  onClose: () => void;
+}) {
+  const label = undo.to === "new" ? "Back to new" : undo.to[0]!.toUpperCase() + undo.to.slice(1);
+  return (
+    <div className="toast" role="region" aria-label="Last decision">
+      <div className="toast-head">
+        <span aria-live="polite">
+          <span className="dot" data-status={undo.to} />
+          <b>
+            {label}
+            {undo.category && ` · ${undo.category}`}
+          </b>{" "}
+          <span className="muted">{undo.title}</span>
+        </span>
+        <button onClick={onUndo} aria-keyshortcuts="U">
+          Undo <kbd>u</kbd>
+        </button>
+        <button
+          className="icon"
+          aria-label="Close"
+          title="Close. The decision stays; it can no longer be undone with u."
+          onClick={onClose}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      {undo.to === "dismissed" &&
+        (undo.category ? (
+          FIRST_FIX[undo.category] && (
+            <p className="muted small">First fix: {FIRST_FIX[undo.category]}</p>
+          )
+        ) : (
+          <div className="reasons" role="group" aria-label="Why it should not have been shown">
+            {DISMISSAL_CATEGORIES.map((c, i) => (
+              <button
+                key={c}
+                title={FIRST_FIX[c] ? `First fix: ${FIRST_FIX[c]}` : undefined}
+                aria-keyshortcuts={String(i + 1)}
+                onClick={() => onCategorize(c)}
+              >
+                <kbd>{i + 1}</kbd> {c}
+              </button>
+            ))}
+          </div>
+        ))}
+      {undo.to === "acted" &&
+        (undo.posted ? (
+          <p className="muted small">Posted: {undo.posted}</p>
+        ) : (
+          <p className="posted small">
+            <input
+              // Keyed to the record, so the next `a` starts empty.
+              key={undo.seq}
+              autoFocus
+              aria-label="Where was it posted"
+              placeholder="Where was it posted?"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") onPosted(event.currentTarget.value);
+                if (event.key === "Escape") event.currentTarget.blur();
+              }}
+            />
+            {/* Beside the field, not in its placeholder: typing hides a
+                placeholder, and this is how keyboard review resumes. */}
+            <span className="muted">
+              <kbd>Enter</kbd> adds it to the note · <kbd>Esc</kbd> skips
+            </span>
+          </p>
+        ))}
     </div>
   );
 }
