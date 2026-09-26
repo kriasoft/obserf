@@ -1,12 +1,21 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initWorkspace } from "../init";
+import { initWorkspace, placeholderQueries } from "../init";
 import {
   MARKER,
   findWorkspaceRoot,
   loadProjects,
+  liveProfiles,
   loadProjectsIfAny,
   projectByKey,
 } from "../workspace";
@@ -185,7 +194,10 @@ describe("initWorkspace", () => {
     mkdirSync(join(root, "node_modules", "@obserf"), { recursive: true });
     symlinkSync(join(import.meta.dir, ".."), join(root, "node_modules", "@obserf", "cli"));
     // The example profile is the format's documentation, so it has to be valid.
-    expect((await loadProjects(root)).map((p) => p.key)).toEqual(["example"]);
+    const scaffolded = await loadProjects(root);
+    expect(scaffolded.map((p) => p.key)).toEqual(["example"]);
+    // The drift guard: every query `init` writes must be one the scan guard finds.
+    expect(placeholderQueries(scaffolded[0]!.queries)).toHaveLength(5);
   });
 
   test("never overwrites, so it is safe to re-run", () => {
@@ -199,6 +211,71 @@ test("projectByKey names what is available", async () => {
   const projects = await loadProjects(workspace({ "a.ts": profile("acme") }));
   expect(projectByKey(projects, "acme").key).toBe("acme");
   expect(() => projectByKey(projects, "nope")).toThrow(/Unknown project "nope". Available: acme/);
+});
+
+describe("placeholderQueries", () => {
+  const queries = (overrides: Partial<ProjectProfile["queries"]> = {}) => ({
+    search: ["the problem, described the way someone having it would say it"],
+    brave: ["site:reddit.com the problem in someone else's words"],
+    subreddits: ["subreddit-without-the-r-prefix"],
+    github: ['"the problem" recommendation in:title is:issue state:open'],
+    githubRepos: ["awesome your-topic in:name,description"],
+    ...overrides,
+  });
+
+  /** The half-done case: the one a warning about the whole file would not catch. */
+  test("returns only the queries that still contain placeholders", () => {
+    expect(
+      placeholderQueries(
+        queries({
+          search: ["how do I review code without uploading it"],
+          brave: ["site:reddit.com self-hosted code review"],
+          github: ["local code review in:title is:issue"],
+          githubRepos: ["awesome code-review in:name,description"],
+        }),
+      ),
+    ).toEqual(["subreddit-without-the-r-prefix"]);
+  });
+
+  /** Adapters trim before sending, so padding would not change what goes out. */
+  test("sees a placeholder through surrounding whitespace", () => {
+    expect(
+      placeholderQueries(
+        queries({ search: ["  the problem, described the way someone having it would say it "] }),
+      ),
+    ).toContain("the problem, described the way someone having it would say it");
+  });
+
+  /** The natural half-edit: a topic appended to the instruction, or a capital. */
+  test("sees a placeholder inside a longer query, in any case", () => {
+    const found = placeholderQueries(
+      queries({
+        search: ["The problem, described the way someone having it would say it"],
+        brave: ["site:reddit.com the problem in someone else's words local code review"],
+      }),
+    );
+    expect(found).toContain("The problem, described the way someone having it would say it");
+    expect(found).toContain(
+      "site:reddit.com the problem in someone else's words local code review",
+    );
+  });
+
+  test("queries without scaffold placeholders are left alone", () => {
+    expect(
+      placeholderQueries({
+        search: ["a"],
+        brave: ["b"],
+        subreddits: ["golang"],
+        github: ["c"],
+        githubRepos: ["d"],
+      }),
+    ).toEqual([]);
+  });
+
+  /** Emptying or omitting an unused list is as valid as rewriting it. */
+  test("absent optional query lists are not placeholders", () => {
+    expect(placeholderQueries({ search: ["a"], subreddits: [], github: [] })).toEqual([]);
+  });
 });
 
 describe("venueRuleFor", () => {
@@ -254,5 +331,86 @@ describe("venueRuleFor", () => {
   test("a non-string or blank entry is no rule", () => {
     expect(venueRuleFor(withGuidance({ "r/golang": 42 }), "r/golang")).toBeNull();
     expect(venueRuleFor(withGuidance({ "r/golang": "   " }), "r/golang")).toBeNull();
+  });
+});
+
+/**
+ * `serve` outlives the edits the review loop exists to prompt. Each assertion
+ * reads through the source as a request would.
+ */
+describe("liveProfiles", () => {
+  test("follows edits, keeps the last good profiles through a broken one, and drops a deleted one", async () => {
+    const root = workspace({
+      "a.ts": profile("a"),
+      "b.ts": profile("b"),
+    });
+    const profiles = await liveProfiles(root);
+    expect((await profiles()).projects.map((p) => p.notFor[0])).toEqual(["n", "n"]);
+
+    writeFileSync(join(root, "projects", "a.ts"), profile("a").replace('["n"]', '["edited"]'));
+    expect((await profiles()).projects[0]?.notFor).toEqual(["edited"]);
+
+    writeFileSync(join(root, "projects", "a.ts"), "export default { key: 'a' };");
+    const broken = await profiles();
+    expect(broken.profileError).toContain("must be a non-empty string");
+    expect(broken.projects[0]?.notFor).toEqual(["edited"]);
+
+    writeFileSync(join(root, "projects", "a.ts"), profile("a").replace('["n"]', '["fixed!"]'));
+    const fixed = await profiles();
+    expect(fixed.profileError).toBeNull();
+    expect(fixed.projects[0]?.notFor).toEqual(["fixed!"]);
+
+    // Same length, same mtime: invisible to size and mtime, not to content.
+    const file = join(root, "projects", "a.ts");
+    const { mtime } = statSync(file);
+    writeFileSync(file, profile("a").replace('["n"]', '["fixed?"]'));
+    utimesSync(file, mtime, mtime);
+    expect((await profiles()).projects[0]?.notFor).toEqual(["fixed?"]);
+
+    rmSync(join(root, "projects", "b.ts"));
+    expect((await profiles()).projects.map((p) => p.key)).toEqual(["a"]);
+  });
+
+  // The temporary directory sits behind macOS's `/var` symlink, where Bun 1.4
+  // can fail to import a file added after the directory was resolved.
+  test("picks up an added profile, and recovers from one that does not parse", async () => {
+    const root = workspace({ "a.ts": profile("a") });
+    const profiles = await liveProfiles(root);
+    writeFileSync(join(root, "projects", "b.ts"), profile("b"));
+    expect((await profiles()).projects.map((p) => p.key)).toEqual(["a", "b"]);
+
+    writeFileSync(join(root, "projects", "b.ts"), "export default {");
+    const broken = await profiles();
+    expect(broken.profileError).not.toBeNull();
+    expect(broken.projects.map((p) => p.key)).toEqual(["a", "b"]);
+
+    writeFileSync(join(root, "projects", "b.ts"), profile("b").replace('["n"]', '["fixed"]'));
+    const fixed = await profiles();
+    expect(fixed.profileError).toBeNull();
+    expect(fixed.projects[1]?.notFor).toEqual(["fixed"]);
+  });
+
+  /** An empty directory is a workspace whose last profile was retired; a missing one is broken. */
+  test("reports a lost directory that held no profiles", async () => {
+    const root = workspace({});
+    const profiles = await liveProfiles(root);
+    expect(await profiles()).toEqual({ projects: [], profileError: null });
+
+    rmSync(join(root, "projects"), { recursive: true });
+    expect((await profiles()).profileError).toContain("No profiles directory");
+  });
+
+  /** Pointing the config at a directory before creating it is an ordinary order of edits. */
+  test("notices a configured directory once it is created", async () => {
+    const root = workspace({ "a.ts": profile("a") });
+    const profiles = await liveProfiles(root);
+    writeFileSync(join(root, MARKER), "export default { projectsDir: './moved' };");
+    expect((await profiles()).profileError).toContain("No profiles directory");
+
+    mkdirSync(join(root, "moved"));
+    writeFileSync(join(root, "moved", "c.ts"), profile("c"));
+    const recovered = await profiles();
+    expect(recovered.profileError).toBeNull();
+    expect(recovered.projects.map((p) => p.key)).toEqual(["c"]);
   });
 });

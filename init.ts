@@ -17,6 +17,50 @@ import { dirname, join, resolve } from "node:path";
 // The version that scaffolded a workspace is the one known to work with it.
 import { version } from "./package.json";
 import { MARKER } from "./workspace";
+import type { ProjectProfile } from "./project";
+
+/**
+ * The scaffold's placeholder queries: prose about what to write, not search
+ * terms. Sent, they retrieve unrelated threads shaped exactly like real
+ * findings, and a real scan spends model quota judging them.
+ *
+ * Interpolated into the template rather than written twice, so the template
+ * cannot drift from what `placeholderQueries` matches. They also identify
+ * scaffolds already in operator workspaces, which `init` never rewrites: keep
+ * recognizing a shipped spelling even if the wording changes.
+ */
+const PLACEHOLDER_QUERIES = {
+  search: "the problem, described the way someone having it would say it",
+  brave: "site:reddit.com the problem in someone else's words",
+  subreddits: "subreddit-without-the-r-prefix",
+  github: '"the problem" recommendation in:title is:issue state:open',
+  githubRepos: "awesome your-topic in:name,description",
+} as const;
+
+/**
+ * The queries that still contain a scaffold placeholder, each named once. Takes
+ * only the queries because they are what a scan sends: a renamed copy still
+ * carrying them is not ready.
+ *
+ * Trimmed first, as every adapter trims before sending, and found anywhere in
+ * the query regardless of case: appending a topic to the instruction, or
+ * capitalizing it, still sends the instruction. Paraphrases are not chased.
+ *
+ * Every field counts, not only those the selected sources read: knowing which
+ * is the adapters' business. An unused list should be empty, not filled in to
+ * pass this.
+ */
+export function placeholderQueries(queries: ProjectProfile["queries"]): string[] {
+  const placeholders = Object.values(PLACEHOLDER_QUERIES).map((q) => q.toLowerCase());
+  return [
+    ...new Set(
+      Object.values(queries)
+        .flatMap((list) => list ?? [])
+        .map((query) => query.trim())
+        .filter((query) => placeholders.some((p) => query.toLowerCase().includes(p))),
+    ),
+  ];
+}
 
 /**
  * Creates a workspace, and never overwrites: run in a directory that already has
@@ -121,14 +165,14 @@ export default defineProject({
   queries: {
     // Shared by Hacker News and Reddit. Plain language, as someone with the
     // problem would type it.
-    search: ["the problem, described the way someone having it would say it"],
+    search: [${JSON.stringify(PLACEHOLDER_QUERIES.search)}],
     // Brave only, so web-index operators stay out of the other sources.
-    brave: ["site:reddit.com the problem in someone else's words"],
-    subreddits: ["subreddit-without-the-r-prefix"],
+    brave: [${JSON.stringify(PLACEHOLDER_QUERIES.brave)}],
+    subreddits: [${JSON.stringify(PLACEHOLDER_QUERIES.subreddits)}],
     // GitHub issue search syntax.
-    github: ['"the problem" recommendation in:title is:issue state:open'],
+    github: [${JSON.stringify(PLACEHOLDER_QUERIES.github)}],
     // GitHub *repository* search — how curated lists are found.
-    githubRepos: ["awesome your-topic in:name,description"],
+    githubRepos: [${JSON.stringify(PLACEHOLDER_QUERIES.githubRepos)}],
   },
 
   // Your own pages: a mention there is not an opportunity.

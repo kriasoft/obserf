@@ -111,7 +111,7 @@ describe("gate: revisiting what it already knows", () => {
   });
 
   test("the operator's decision outranks any new activity", () => {
-    for (const status of ["dismissed", "acted"] as const) {
+    for (const status of ["skipped", "dismissed", "acted"] as const) {
       const result = gate([candidate({ metrics: { points: 500, comments: 300 } })], {
         ...POLICY,
         known: known({ status }),

@@ -45,6 +45,9 @@ body {
   top: 0;
   z-index: 1;
   display: flex;
+  /* Wraps rather than squeezing: in a narrow list pane a label broke over two
+     lines and pushed the count off the edge. */
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   padding: 12px 16px;
@@ -56,6 +59,7 @@ body {
   align-items: center;
   gap: 4px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .count {
   margin-left: auto;
@@ -257,20 +261,47 @@ h1 {
   color: var(--muted);
 }
 
+/* Earlier verdicts: separated so each reads as one judgment. */
+.earlier > div {
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.earlier p {
+  margin: 2px 0;
+}
+
+/* What the latest scan changed: the place a review starts. */
+.mark {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: normal;
+  color: #8fd3e8;
+  border: 1px solid #2c5663;
+}
+
 .undo {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 7px 16px;
   border-bottom: 1px solid var(--line);
   background: #171b26;
 }
-.undo span {
+.undo > span {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+/* The category prompt after a dismissal: its own line under the undo row. */
+.undo > p {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 /* Excerpts run to 60k characters. Above the note box it has to be bounded, or
@@ -278,4 +309,19 @@ h1 {
 .excerpt {
   max-height: 40vh;
   overflow: auto;
+}
+
+/* Stacked rather than one line: a scan can be late, short a source and failed
+   at once, and a warning wrapped mid-sentence goes unread. */
+.scan {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.scan-run {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }

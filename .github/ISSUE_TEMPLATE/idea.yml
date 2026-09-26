@@ -1,0 +1,19 @@
+name: Idea
+description: A feature, a source, or a ranking that should change.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [the product overview](https://github.com/kriasoft/obserf/blob/main/docs/product/overview.md) first. Obserf never posts, so anything that would post, write to a venue, or add a flag to do so will be declined. A finding surfaced that should not have been is usually fixed by a line in your profile's `notFor`, not by a change here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, and where Obserf fell short. Evidence beats opinion — a measured result, a missed thread, a wrong ranking.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose

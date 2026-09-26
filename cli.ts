@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
 /**
- * Command dispatch and terminal output. Everything here is presentation; the
- * pipeline modules hold the logic and are callable without it.
+ * Command dispatch and terminal output. Everything here is presentation, with
+ * one exception: which projects and findings a command acts on. That belongs to
+ * the invocation rather than to the pipeline, which is callable without any of
+ * this.
  */
 
+import { statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 // The version that scaffolded a workspace is the one known to work with it.
 import { version } from "./package.json";
 import { parseArgs } from "node:util";
-import { initWorkspace } from "./init";
+import { initWorkspace, placeholderQueries } from "./init";
 import {
   MARKER,
   backupsDir,
@@ -21,27 +24,41 @@ import {
 import {
   databasePath,
   draftsFor,
+  earlierAssessments,
+  assessmentsByIds,
   findingById,
   latestFindings,
+  type ListedFinding,
   prepareDatabase,
+  recentRuns,
+  runById,
   setTriage,
+  storedCounts,
+  storedProjects,
 } from "./db";
 import { backup, backups, restore } from "./db/backup";
-import type { Finding } from "./db/schema";
+import type { Assessment, Draft, Finding } from "./db/schema";
+import { venueRuleFor, type ProjectProfile } from "./project";
 import {
+  DISMISSAL_CATEGORIES,
   DRAFT_KINDS,
   EVERGREEN,
+  FIRST_FIX,
   TRIAGE_STATUSES,
+  WORTH_SURFACING,
   defaultKindFor,
-  type DraftKind,
+  compactAge,
+  draftContextNote,
+  type DismissalCategory,
   type OpportunityType,
+  type SourceId,
   type TriageStatus,
 } from "./vocabulary";
-import { venueRuleFor, type ProjectProfile } from "./project";
 import { generateDraft } from "./pipeline/draft";
-import { rescore } from "./pipeline/rescore";
 import { hostOf } from "./url";
 import { scan } from "./pipeline/scan";
+import { rank, scoreNow } from "./pipeline/score";
+import type { Usage } from "./agent";
 
 const HELP = `obserf — find free marketing opportunities for your projects
 
@@ -49,22 +66,36 @@ Usage: obserf <command> [options]
 
   scan      Discover, gate, enrich, and assess new opportunities
               --project <key>   Project to scan (default: all)
-              --source <id>     Override profile sources (repeatable)
-              --dry-run         List gate survivors; no model calls, no writes
+              --source <id>     Override profile sources
+                                comma-separated or repeated
+              --dry-run         List gate survivors; no model calls, nothing stored
 
   list      Show ranked opportunities
               --project <key>   Filter by project
-              --status <s>      new | shortlisted | dismissed | acted (default: new)
+              --status <s>      new | shortlisted | skipped | dismissed | acted
+                                (default: new)
+                                comma-separated or repeated
               --min <score>     Minimum score (default: 1)
               --limit <n>       Default 20
+              --run <n>         The top 10 as scan n left them, in that order,
+                                with their status now, then the bar result;
+                                replaces the three above
 
   show <id>     Full detail for one finding, with its drafts
   draft <id>    Write a draft for a finding
                   --kind comment | reply | submission
-                  (default: chosen from the opportunity type)
+                  (default: from the opportunity type, and a reply
+                   where the finding is one comment in a thread)
   triage <id> <status> [--note "..."]
-  rescore       Recompute scores from stored components; no model calls
-                  --project <key>   Restrict to one project
+                  skipped: worth surfacing, not pursuing it
+                  dismissed: Obserf should not have surfaced it
+                  --category <c>    Why it was dismissed (dismissed only):
+                                    cannot-solve, vocabulary-only,
+                                    no-participation, venue-forbids, paid,
+                                    concluded, no-audience, other
+  runs          Recent scans: what ran, what the gate dropped, what it spent
+                  --project <key>   Filter by project
+                  --limit <n>       Default 10
   projects      List the workspace's projects
   init [dir]    Create a workspace here, or in <dir>
   backup        Snapshot the database
@@ -78,6 +109,113 @@ The model runs on your Claude Code subscription — no API key. GitHub borrows
 the gh CLI's token (OBSERF_GITHUB_USER picks the account). Brave and Reddit read
 BRAVE_API_KEY and REDDIT_CLIENT_ID/SECRET from .env; both are optional.`;
 
+/**
+ * What each command accepts. One `parseArgs` declares every option obserf has, so
+ * without this a flag meant for another command parses cleanly and is then
+ * ignored — `obserf backup --project x` snapshotting the whole database, or
+ * `obserf scan --limit 3` spending the quota the operator was trying to cap.
+ *
+ * `args` is the most positionals a command takes, not the fewest. Too few is the
+ * command's own to report, because it knows what the missing one is for.
+ *
+ * A `Map`, so a command named `constructor` finds nothing.
+ */
+const ACCEPTS = new Map<string, { flags: readonly string[]; args: number }>([
+  ["scan", { flags: ["project", "source", "dry-run"], args: 0 }],
+  ["list", { flags: ["project", "status", "min", "limit", "run"], args: 0 }],
+  ["show", { flags: [], args: 1 }],
+  ["draft", { flags: ["kind"], args: 1 }],
+  ["triage", { flags: ["note", "category"], args: 2 }],
+  ["runs", { flags: ["project", "limit"], args: 0 }],
+  ["projects", { flags: [], args: 0 }],
+  ["init", { flags: [], args: 1 }],
+  // One database file, so there is nothing for `--project` to scope.
+  ["backup", { flags: [], args: 0 }],
+  ["backups", { flags: [], args: 0 }],
+  ["restore", { flags: [], args: 1 }],
+  ["serve", { flags: ["port"], args: 0 }],
+]);
+
+/**
+ * Rejects what a command was given and does not use. Runs before dispatch, so no
+ * command has opened the database, loaded a profile, sent a request or written a
+ * snapshot by the time the operator is told they were misunderstood.
+ *
+ * An unrecognised command that parsed is left to the dispatcher, which answers
+ * with the help text.
+ */
+function checkUsage(
+  command: string,
+  values: Record<string, unknown>,
+  positionals: string[],
+  tokens: readonly { kind: string; name?: string }[],
+): void {
+  const accepts = ACCEPTS.get(command);
+  if (!accepts) return;
+
+  // `parseArgs` returns only the options actually supplied, so the keys are what
+  // the operator typed — a flag left off is absent, not false.
+  const stray = Object.keys(values).filter((flag) => !accepts.flags.includes(flag));
+  if (stray.length) {
+    throw new Error(
+      `\`obserf ${command}\` does not take ${stray.map((f) => `--${f}`).join(" or ")}. ` +
+        (accepts.flags.length
+          ? `It takes ${accepts.flags.map((f) => `--${f}`).join(", ")}.`
+          : "It takes no options."),
+    );
+  }
+
+  if (positionals.length > accepts.args) {
+    const extra = positionals
+      .slice(accepts.args)
+      .map((a) => `"${a}"`)
+      .join(", ");
+    const takes =
+      accepts.args === 0
+        ? "takes no arguments"
+        : `takes ${accepts.args} argument${accepts.args === 1 ? "" : "s"} at most`;
+    throw new Error(`\`obserf ${command}\` ${takes}, so ${extra} would be ignored.`);
+  }
+
+  // A flag that is not a list keeps only its last value, so a repeat would
+  // discard the first as quietly as a stray flag is ignored.
+  const seen = new Set<string>();
+  for (const { kind, name } of tokens) {
+    if (kind !== "option" || !name || Array.isArray(values[name])) continue;
+    if (seen.has(name)) throw new Error(`--${name} was given more than once.`);
+    seen.add(name);
+  }
+}
+
+/**
+ * `--status` or `--source`, comma-separated or repeated: both are closed
+ * vocabularies, so no value contains a comma. Not for free-text lists.
+ */
+export function listArg(name: string, values: string[] | undefined): string[] | undefined {
+  if (!values) return undefined;
+  const items = values
+    .flatMap((value) => value.split(","))
+    .map((item) => item.trim())
+    .filter(Boolean);
+  // Given and empty is not the same as absent: `--status ,` asked for something.
+  if (!items.length) throw new Error(`--${name} was given no value.`);
+  return items;
+}
+
+function dismissalCategory(raw: string): DismissalCategory {
+  const category = DISMISSAL_CATEGORIES.find((value) => value === raw);
+  if (!category) {
+    throw new Error(`Unknown category "${raw}". Use: ${DISMISSAL_CATEGORIES.join(", ")}`);
+  }
+  return category;
+}
+
+function triageStatus(raw: string): TriageStatus {
+  const status = TRIAGE_STATUSES.find((value) => value === raw);
+  if (!status) throw new Error(`Unknown status "${raw}". Use: ${TRIAGE_STATUSES.join(", ")}`);
+  return status;
+}
+
 /** A numeric flag, rejected here rather than reaching SQL or `Bun.serve` as NaN. */
 function intArg(name: string, raw: string | undefined, fallback: number, min = 1): number {
   if (raw === undefined) return fallback;
@@ -88,36 +226,192 @@ function intArg(name: string, raw: string | undefined, fallback: number, min = 1
   return value;
 }
 
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+/**
+ * The project a `--project` flag names, checked before it reaches a SQL filter
+ * that would match nothing — which reads as a quiet week.
+ *
+ * Stored keys answer first, so a retired profile's history stays readable
+ * without importing any profile. Then the profiles, allowing none left; one that
+ * will not load is reported as itself, not as an unknown key.
+ */
+async function resolveProjectFilter(key: string | undefined): Promise<string | undefined> {
+  if (key === undefined) return undefined;
+  // Downstream SQL treats a falsy project as unfiltered.
+  if (!key) throw new Error("--project was given no value.");
+
+  // No database means no stored keys, and a typo should not create one. Not
+  // `existsSync`, which reports an unreadable path as absent.
+  const stored = statSync(databasePath, { throwIfNoEntry: false }) ? storedProjects() : [];
+  if (stored.includes(key)) return key;
+
+  const profiles = (await loadProjectsIfAny()).map((project) => project.key);
+  if (profiles.includes(key)) return key;
+
+  const known = [...new Set([...profiles, ...stored])].sort();
+  throw new Error(
+    `Unknown project "${key}". ` +
+      (known.length ? `Available: ${known.join(", ")}` : "No projects are available."),
+  );
+}
+
+/**
+ * The venue, or null when it only repeats the URL's host or a host-qualified
+ * path prefix (`news.ycombinator.com` beside an item under it). The URL is the
+ * part kept: it is what gets opened.
+ *
+ * Never a substring match: a path-only label like `r/golang` is the compact name
+ * worth keeping beside `reddit.com/r/golang/…`, and `github.com/o/list` is not
+ * `github.com/o/list-next`. Venues
+ * are compared as adapters write them, so an unexpected spelling keeps the venue
+ * rather than dropping it.
+ */
+export function venueUnlessRedundant(venue: string, url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return venue;
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  // The path keeps its case; only a host is case-insensitive.
+  const located = host + parsed.pathname.replace(/\/+$/, "");
+  return venue === host || venue === located || located.startsWith(`${venue}/`) ? null : venue;
+}
+
+/** How wide prose may run, or 0 when nothing is reading this on a screen. */
+function terminalWidth(): number {
+  if (!process.stdout.isTTY) return 0;
+  const columns = process.stdout.columns;
+  return Number.isInteger(columns) && columns > 0 ? columns : 80;
+}
+
+/** What a reader counts as one character, which is what may not be cut in half. */
+const GRAPHEMES = new Intl.Segmenter();
+
+/**
+ * `text` cut to `columns` display columns, `…` included.
+ *
+ * By column and grapheme, not `slice`, which can end on half an emoji and
+ * lets seventy CJK units run to 140 columns. Not `Bun.sliceAnsi`: it keeps a
+ * wide character straddling the last column, one past the budget.
+ */
+export function clipped(text: string, columns: number): string {
+  if (columns <= 0) return "";
+  if (Bun.stringWidth(text) <= columns) return text;
+
+  let kept = "";
+  let used = 0;
+  // Not by code point: a heart's variation selector measures zero alone and two
+  // with the heart. One column is held back for the ellipsis.
+  for (const { segment: character } of GRAPHEMES.segment(text)) {
+    const width = Bun.stringWidth(character);
+    if (used + width > columns - 1) break;
+    kept += character;
+    used += width;
+  }
+  return `${kept}…`;
+}
+
+/**
+ * Prose broken to the terminal, every line under the same indent.
+ *
+ * Reasons run to 280 characters, and printed flat they wrap against the margin,
+ * so ten findings arrive as a wall. Not when piped: there a reason stays on one
+ * line for whatever is matching against it.
+ *
+ * Applied to plain text, before colour. `width` is a parameter because a test
+ * cannot be a terminal.
+ */
+export function wrapped(text: string, indent: string, width = terminalWidth()): string {
+  const limit = width - Bun.stringWidth(indent);
+  // Only breaks are added: the operator's own line breaks and spacing in a note
+  // survive. `hard: false`: a URL overflows rather than breaking in half.
+  const lines = limit < 24 ? text : Bun.wrapAnsi(text, limit, { hard: false });
+  return lines
+    .split("\n")
+    .map((line) => indent + line)
+    .join("\n");
+}
+
+/**
+ * Whether ANSI belongs on a stream: it is a terminal, and `NO_COLOR` has not
+ * been set to anything (no-color.org — present and non-empty disables, whatever
+ * the value).
+ *
+ * Per stream, because the two are redirected independently: `obserf list > file`
+ * leaves stderr on the terminal, where an error is still worth colouring, and
+ * `obserf scan 2> log` is the reverse.
+ *
+ * `noColor` is a parameter so the rule is testable without the ambient value.
+ */
+export function colourable(stream: { isTTY?: boolean }, noColor = process.env.NO_COLOR): boolean {
+  return stream.isTTY === true && !noColor;
+}
+
+/**
+ * A style that applies itself only where it would be seen. Decided once, at
+ * load: a shell redirects before the process starts, and nothing here changes
+ * where its output goes afterwards.
+ */
+function styler(stream: { isTTY?: boolean }): (code: string, text: string) => string {
+  const on = colourable(stream);
+  return (code, text) => (on ? `\x1b[${code}m${text}\x1b[0m` : text);
+}
+
+const onStdout = styler(process.stdout);
+const onStderr = styler(process.stderr);
+
+const dim = (s: string) => onStdout("2", s);
+const bold = (s: string) => onStdout("1", s);
+const red = (s: string) => onStdout("31", s);
+const cyan = (s: string) => onStdout("36", s);
+/** Red where the top-level handler writes, which is not where everything else does. */
+const stderrRed = (s: string) => onStderr("31", s);
+
+/** Token spend, phrased identically wherever it is reported. */
+function usageLine(usage: Usage): string {
+  const { inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens, estimatedCostUsd } = usage;
+  return (
+    `${inputTokens + cacheReadTokens + cacheWriteTokens} in (${cacheReadTokens} cached) / ` +
+    `${outputTokens} out tokens · ~$${estimatedCostUsd.toFixed(3)} at list price`
+  );
+}
 
 function scoreColor(score: number): string {
-  const code = score >= 70 ? 32 : score >= 40 ? 33 : 90;
-  return `\x1b[${code}m${String(score).padStart(3)}\x1b[0m`;
+  // Padded before it is coloured, so an uncoloured run still lines up.
+  return onStdout(score >= 70 ? "32" : score >= 40 ? "33" : "90", String(score).padStart(3));
 }
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  // Before the grammar is parsed or checked, deliberately: help is what someone
+  // runs when they do not know the grammar, so it must not be the one command
+  // that insists on it.
   if (!command || command === "help" || command === "--help") {
     console.log(HELP);
     return;
   }
 
-  const { values, positionals } = parseArgs({
+  const { values, positionals, tokens } = parseArgs({
     args: rest,
     allowPositionals: true,
+    tokens: true,
     options: {
       project: { type: "string" },
       source: { type: "string", multiple: true },
-      status: { type: "string" },
+      status: { type: "string", multiple: true },
       kind: { type: "string" },
       note: { type: "string" },
+      category: { type: "string" },
       min: { type: "string" },
       limit: { type: "string" },
+      run: { type: "string" },
       port: { type: "string" },
       "dry-run": { type: "boolean" },
     },
   });
+
+  checkUsage(command, values, positionals, tokens);
 
   switch (command) {
     case "scan":
@@ -129,12 +423,9 @@ async function main(): Promise<void> {
     case "draft":
       return runDraft(positionals[0], values.kind);
     case "triage":
-      return runTriage(positionals[0], positionals[1], values.note);
-    case "rescore": {
-      const count = rescore(values.project);
-      console.log(`Rescored ${count} assessment${count === 1 ? "" : "s"}.`);
-      return;
-    }
+      return runTriage(positionals[0], positionals[1], values.note, values.category);
+    case "runs":
+      return runRuns(values);
     case "init":
       return runInit(positionals[0]);
     // These reach the database by path rather than by opening it, so without
@@ -164,7 +455,7 @@ async function main(): Promise<void> {
       console.log(dim(`In ${backupsDir}, oldest first:`));
       for (const { path, takenAt, reason } of found) {
         // Display local time; the filename retains the UTC timestamp.
-        const when = `${takenAt.toDateString().slice(4)} ${takenAt.toTimeString().slice(0, 5)}`;
+        const when = `${day(takenAt)} ${takenAt.toTimeString().slice(0, 5)}`;
         console.log(
           `  ${dim(when.padEnd(17))} ${(reason ?? "unlabelled").padEnd(11)} ${basename(path)}`,
         );
@@ -189,15 +480,22 @@ async function main(): Promise<void> {
 }
 
 async function runScan(values: { project?: string; source?: string[]; "dry-run"?: boolean }) {
+  const sourceIds = listArg("source", values.source);
   const projects = await loadProjects();
   const targets = values.project ? [projectByKey(projects, values.project)] : projects;
   const dryRun = values["dry-run"] ?? false;
-  // A dry run writes nothing and needs no database, reading any existing one
-  // read-only. Every other path here stores findings, so it opens — and upgrades
-  // — before spending the first model call rather than after.
+
+  const ready = readyToScan(targets);
+  if (!ready.length) {
+    throw new Error("No selected project was scanned: scaffold placeholder queries remain.");
+  }
+  // A dry run writes no findings and runs no migration, reading any existing
+  // database through a connection of its own. Every other path here stores
+  // findings, so it opens — and upgrades — before spending the first model call
+  // rather than after.
   if (!dryRun) prepareDatabase();
 
-  for (const project of targets) {
+  for (const project of ready) {
     console.log(
       `\n${bold(project.name)} ${dim(`(${project.key})`)}${dryRun ? dim(" — dry run") : ""}`,
     );
@@ -208,7 +506,7 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
     let best = 0;
 
     const result = await scan(project, {
-      sourceIds: values.source,
+      sourceIds,
       dryRun,
       onProgress: (event) => {
         switch (event.type) {
@@ -222,7 +520,7 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
             console.log(dim(`  ${event.sourceId}… skipped (${event.reason})`));
             break;
           case "source:error":
-            console.log(`\x1b[31mfailed: ${event.error}\x1b[0m`);
+            console.log(red(`failed: ${event.error}`));
             break;
           case "enrich:start":
             // Not "repositories": which of its survivors an adapter actually
@@ -251,10 +549,7 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
       },
     });
 
-    const gates = Object.entries(result.rejected)
-      .filter(([, n]) => n > 0)
-      .map(([rule, n]) => `${n} ${rule}`)
-      .join(", ");
+    const gates = gateDrops(result.rejected);
     const outcome = dryRun
       ? `${result.survivors.length} would be assessed`
       : `${result.assessed} assessed`;
@@ -270,62 +565,443 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
     if (dryRun) {
       // Show every survivor so query tuning is not based on a truncated sample.
       for (const item of result.survivors) {
-        console.log(`  ${dim(hostOf(item.url).padEnd(28))} ${item.title.slice(0, 68)}`);
+        console.log(`  ${dim(hostOf(item.url).padEnd(28))} ${clipped(item.title, 68)}`);
       }
       continue;
     }
 
-    const { inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens } = result.usage;
-    console.log(
-      dim(
-        `  ${inputTokens + cacheReadTokens + cacheWriteTokens} in ` +
-          `(${cacheReadTokens} cached) / ${outputTokens} out tokens · ` +
-          `~$${result.usage.estimatedCostUsd.toFixed(3)} at list price`,
-      ),
-    );
+    console.log(dim(`  ${usageLine(result.usage)}`));
 
     for (const item of result.scored.slice(0, 10)) {
       console.log(
-        `  ${scoreColor(item.score)} ${dim(`#${item.findingId}`)} ${item.title.slice(0, 80)}`,
+        `  ${scoreColor(item.score)} ${dim(`#${item.findingId}`)} ${clipped(item.title, 80)}`,
       );
     }
     if (!result.scored.length) console.log(dim("  nothing scored above zero"));
+    // What this scan assessed is not the inbox it left: that includes earlier
+    // findings, and is the ten the bar is counted on.
+    if (result.runId !== null) {
+      console.log(dim(`  inbox top 10 frozen: obserf list --run ${result.runId}`));
+    }
   }
 }
 
-function runList(values: { project?: string; status?: string; min?: string; limit?: string }) {
-  const status = (values.status?.split(",") ?? ["new"]) as TriageStatus[];
-  for (const s of status) {
-    if (!TRIAGE_STATUSES.includes(s)) {
-      throw new Error(`Unknown status "${s}". Use: ${TRIAGE_STATUSES.join(", ")}`);
+/**
+ * The projects worth searching for, reporting the ones that are not — see
+ * `placeholderQueries` for why a placeholder must not be sent.
+ *
+ * Checked before the database is opened and before the first request goes out,
+ * dry runs included: `init` points the operator there next, and discovery still
+ * spends source quota.
+ *
+ * Reported and skipped rather than fatal, so one forgotten `example.ts` does not
+ * stop a ready project; the scan fails only when nothing is left.
+ */
+function readyToScan(targets: ProjectProfile[]): ProjectProfile[] {
+  const ready: ProjectProfile[] = [];
+  for (const project of targets) {
+    const unfinished = placeholderQueries(project.queries);
+    if (!unfinished.length) {
+      ready.push(project);
+      continue;
     }
+    console.log(`\n${bold(project.name)} ${dim(`(${project.key})`)}`);
+    console.log(red("  Not scanned: these queries still contain scaffold placeholders."));
+    for (const query of unfinished) console.log(dim(`    ${query}`));
+    // Emptying is as valid an answer as rewriting: a project with no Reddit
+    // audience should leave `subreddits` empty, not invent one to get past this.
+    console.log(
+      dim(
+        "  Under `queries`, replace each placeholder with a real value for this\n" +
+          "  project — or remove it where that kind of search is unused.",
+      ),
+    );
   }
+  return ready;
+}
 
-  const rows = latestFindings({
-    project: values.project,
-    status,
-    minScore: intArg("min", values.min, 1, 0),
-    limit: intArg("limit", values.limit, 20),
-  });
+async function runList(values: {
+  project?: string;
+  status?: string[];
+  min?: string;
+  limit?: string;
+  run?: string;
+}) {
+  if (values.run !== undefined) return runListFrozen(values.run, values);
+  const status = (listArg("status", values.status) ?? ["new"]).map(triageStatus);
+
+  // Before the project lookup, which may open the database.
+  const minScore = intArg("min", values.min, 1, 0);
+  const limit = intArg("limit", values.limit, 20);
+  const project = await resolveProjectFilter(values.project);
+  const rows = rank(latestFindings({ project, status }), { minScore, limit });
 
   if (!rows.length) {
-    console.log(dim("Nothing to show. Run `obserf scan` first."));
+    // Filtered findings, runs without findings, and no recorded history want
+    // different advice. A dry run deliberately leaves no run row. The follow-ups
+    // keep `--project`, so they stay within what the operator asked about.
+    const { findings, runs } = storedCounts(project);
+    const scope = project ? ` for ${project}` : "";
+    const projectFlag = project ? ` --project ${project}` : "";
+    console.log(
+      dim(
+        findings
+          ? `Nothing${scope} matches --status ${status.join(",")} --min ${minScore}.`
+          : runs
+            ? `No findings stored${scope}. See \`obserf runs${projectFlag}\` for scan history.`
+            : `No scans recorded${scope} yet. Run \`obserf scan${projectFlag}\`.`,
+      ),
+    );
     return;
   }
 
-  for (const { finding, assessment, note, drafts } of rows) {
-    console.log(
-      `${scoreColor(assessment?.score ?? 0)} ${dim(`#${String(finding.id).padEnd(4)}`)} ` +
-        `${bold(finding.title.slice(0, 70))}`,
-    );
-    console.log(
-      `     ${dim(`${finding.venue} · ${assessment?.opportunity ?? "?"}${drafts ? ` · ${drafts} draft${drafts === 1 ? "" : "s"}` : ""} · ${finding.url}`)}`,
-    );
-    if (assessment?.reason) console.log(`     ${dim(assessment.reason)}`);
-    // Last and labelled: the model's reason and the operator's own conclusion
-    // about it are different claims, and a shortlist is unreadable if they blur.
-    if (note) console.log(`     ${dim("note:")} ${note}`);
+  // A list of one status says it in the command; a mixed one has to say it per
+  // row, or reading it against labels (evaluation.md) needs a `show` per finding.
+  const showStatus = status.length > 1;
+  for (const row of rows) printListed(row, row.score, { showProject: !project, showStatus });
+}
+
+/**
+ * A scan's frozen inbox: the cohort the bar is judged on, in the order and with
+ * the scores it had when the scan finished, beside each finding's status now.
+ * Unlike the live list it cannot shrink or reorder while it is being triaged,
+ * which is what makes "5 of the top 10" countable. See docs/product/evaluation.md.
+ */
+async function runListFrozen(
+  runArg: string,
+  values: { project?: string; status?: string[]; min?: string; limit?: string },
+) {
+  // Before the database opens. Any filter would change which findings the cohort is.
+  const filters = [
+    values.status ? "--status" : "",
+    values.min !== undefined ? "--min" : "",
+    values.limit !== undefined ? "--limit" : "",
+  ].filter(Boolean);
+  if (filters.length) {
+    throw new Error(`--run lists the inbox as that scan left it; drop ${filters.join(", ")}.`);
   }
+  const runId = intArg("run", runArg, 0);
+  const project = await resolveProjectFilter(values.project);
+
+  const run = runById(runId);
+  if (!run) throw new Error(`No scan #${runId}. See \`obserf runs\`.`);
+  // `--run` names the project already; a different one is a mistake, not a filter.
+  if (project && project !== run.project) {
+    throw new Error(`Scan #${runId} was of ${run.project}, not ${project}.`);
+  }
+  const finished = run.finishedAt;
+  if (!run.inbox || !finished) {
+    throw new Error(
+      !finished
+        ? `Scan #${runId} never finished, so it froze no inbox.`
+        : run.error
+          ? `Scan #${runId} failed, so it froze no inbox: ${run.error}`
+          : `Scan #${runId} predates frozen inboxes.`,
+    );
+  }
+
+  console.log(
+    dim(`Scan #${runId} · ${run.project} · ${day(finished)} · top ${run.inbox.length} then`),
+  );
+  if (!run.inbox.length) {
+    // Still followed by the bar: an empty cohort is a result, and an inconclusive one.
+    console.log(dim("No new finding scored above zero when it finished."));
+  }
+  const ids = run.inbox.map((entry) => entry.findingId);
+  const rows = new Map(
+    (ids.length ? latestFindings({ ids }) : []).map((row) => [row.finding.id, row]),
+  );
+  // The verdicts the ten were ranked on. A row pairs its frozen score with its
+  // frozen verdict, never with a newer one: that pairing never existed.
+  const verdicts = new Map(
+    assessmentsByIds(run.inbox.map((entry) => entry.assessmentId)).map((v) => [v.id, v]),
+  );
+  for (const { findingId, assessmentId, score } of run.inbox) {
+    const row = rows.get(findingId);
+    // Said rather than skipped: a gap in the ten is part of what gets counted.
+    if (!row) {
+      console.log(
+        `${scoreColor(score)} ${dim(`#${String(findingId).padEnd(4)} no longer stored`)}`,
+      );
+      continue;
+    }
+    const frozen = verdicts.get(assessmentId) ?? null;
+    printListed({ ...row, assessment: frozen }, score, { showProject: false, showStatus: true });
+    if (!frozen) {
+      console.log(`     ${dim("the verdict it was ranked on is no longer stored")}`);
+    } else if (row.assessment?.id !== assessmentId) {
+      console.log(
+        `     ${dim(`reassessed since · obserf show ${findingId} has the newer verdict`)}`,
+      );
+    }
+  }
+
+  // Plain lines, uncoloured: this block is what gets pasted into the commit that
+  // records the result — see "What to record" in docs/product/evaluation.md.
+  const bar = barResult(
+    run.inbox.map(({ findingId, assessmentId }) => {
+      const row = rows.get(findingId);
+      return row
+        ? {
+            findingId,
+            status: row.status,
+            category: row.dismissalCategory,
+            hidden: row.firstDecidedHidden,
+            reassessed: row.assessment?.id !== assessmentId,
+          }
+        : null;
+    }),
+  );
+  console.log("");
+  console.log(`Bar: ${bar.hits} of ${bar.total} worth surfacing — ${bar.verdict}`);
+  console.log(
+    `Top 3: ${
+      bar.top3Dismissed.length
+        ? `${bar.top3Dismissed.map((d) => `#${d.findingId} dismissed (${d.category ?? "no category"})`).join(", ")} — judge manually`
+        : "no dismissals"
+    }`,
+  );
+  const { hidden, shown, unrecorded } = bar.firstDecided;
+  if (hidden + shown + unrecorded) {
+    console.log(
+      `First decided: ${hidden} with the reason hidden, ${shown} shown` +
+        (unrecorded ? `, ${unrecorded} unrecorded` : ""),
+    );
+  }
+  if (bar.dismissed.length)
+    console.log(`Dismissed: ${tally(bar.dismissed.map((d) => d.category ?? "no category"))}`);
+  console.log(
+    `Scan #${runId} · ${run.project} · ${day(finished)} · ${describeSources(run.sources, run.skipped)}`,
+  );
+  const ranked = [...verdicts.values()];
+  if (ranked.length) {
+    console.log(
+      `Verdicts: ${tally(ranked.map((v) => v.model))} · rubric/brief ${tally(ranked.map((v) => v.promptFingerprint))}`,
+    );
+  }
+  // After the block, not in it: advice for now, not part of the record. Only for
+  // undecided findings — triage cannot repair a missing or reassessed cohort.
+  // The CLI, not the inbox: this list has just shown their reasons, and the
+  // inbox would record a decision made after that as hidden.
+  if (bar.pending) {
+    console.log(
+      dim(
+        `\nDecide the ${bar.pending} still new with \`obserf triage <id> <status>\`, ` +
+          `then run \`obserf list --run ${runId}\` again — before scanning ${run.project} again.`,
+      ),
+    );
+  }
+}
+
+type BarRow = {
+  findingId: number;
+  status: TriageStatus;
+  category: DismissalCategory | null;
+  /** Whether the first decision was made with the model's reason hidden; null if unrecorded. */
+  hidden: boolean | null;
+  /**
+   * The finding has a newer verdict than the one it was frozen with, so a
+   * decision made since may answer that verdict rather than the ranked one.
+   */
+  reassessed: boolean;
+} | null;
+
+/**
+ * The bar from docs/product/evaluation.md, over a frozen cohort in rank order:
+ * at least 5 of the top 10 worth surfacing (shortlisted, skipped or acted — see
+ * `WORTH_SURFACING`), and no embarrassing false
+ * positive in the top 3. Only the count is mechanical. Whether a dismissal in
+ * the top 3 was embarrassing is the operator's judgment, so it is named, never
+ * decided. `null` is a finding no longer stored, which can never be labelled.
+ */
+export function barResult(rows: BarRow[]) {
+  const labelled = rows.filter((row) => row !== null);
+  const hits = labelled.filter((row) => WORTH_SURFACING.has(row.status));
+  const dismissed = labelled.filter((row) => row.status === "dismissed");
+  const top3Dismissed = rows.slice(0, 3).filter((row) => row?.status === "dismissed");
+  const pending = labelled.filter((row) => row.status === "new").length;
+  const gone = rows.length - labelled.length;
+  const reassessed = labelled.filter((row) => row.reassessed).length;
+
+  // Inconclusive first: a count over an unfinished review would change as it
+  // finishes, and fewer than ten is not a pass (evaluation.md).
+  const verdict =
+    rows.length < 10
+      ? `inconclusive: only ${rows.length} in the inbox`
+      : pending || gone || reassessed
+        ? `inconclusive: ${[
+            pending ? `${pending} still new` : "",
+            gone ? `${gone} no longer stored` : "",
+            // Fails loudly rather than crediting this ranking with judgments that
+            // may have been made against a later verdict.
+            reassessed ? `${reassessed} reassessed since this scan` : "",
+          ]
+            .filter(Boolean)
+            .join(", ")}`
+        : hits.length < 5
+          ? "missed"
+          : top3Dismissed.length
+            ? "met on count; the top 3 needs judgment"
+            : "met";
+
+  const decided = labelled.filter((row) => row.status !== "new");
+  return {
+    hits: hits.length,
+    total: rows.length,
+    /** Findings still `new`: the one gap in the result the operator can close. */
+    pending,
+    verdict,
+    /** How the decided ones were first judged, for the record's bias caveat. */
+    firstDecided: {
+      hidden: decided.filter((row) => row.hidden === true).length,
+      shown: decided.filter((row) => row.hidden === false).length,
+      unrecorded: decided.filter((row) => row.hidden === null).length,
+    },
+    dismissed: dismissed.map((row) => ({ findingId: row.findingId, category: row.category })),
+    top3Dismissed: top3Dismissed.flatMap((row) =>
+      row ? [{ findingId: row.findingId, category: row.category }] : [],
+    ),
+  };
+}
+
+/** `a 3, b 1`, most frequent first. */
+function tally(values: string[]): string {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([value, n]) => `${value} ${n}`)
+    .join(", ");
+}
+
+function printListed(
+  { finding, assessment, note, status, dismissalCategory, drafts, latestScan }: ListedFinding,
+  score: number,
+  options: { showProject: boolean; showStatus: boolean },
+) {
+  // A frozen cohort is read against its own scan, not the latest one.
+  const mark = options.showStatus ? null : latestScan;
+  console.log(
+    `${scoreColor(score)} ${dim(`#${String(finding.id).padEnd(4)}`)} ` +
+      `${bold(clipped(finding.title, 70))}` +
+      (mark ? ` ${cyan(mark)}` : ""),
+  );
+  const meta = [
+    options.showProject ? finding.project : "",
+    compactAge(finding.publishedAt),
+    venueUnlessRedundant(finding.venue, finding.url),
+    assessment?.opportunity ?? "?",
+    drafts ? `${drafts} draft${drafts === 1 ? "" : "s"}` : "",
+    dismissalCategory ? `dismissed: ${dismissalCategory}` : options.showStatus ? status : "",
+    finding.url,
+  ].filter(Boolean);
+  console.log(`     ${dim(meta.join(" · "))}`);
+  if (assessment?.reason) console.log(dim(wrapped(assessment.reason, "     ")));
+  // Last and labelled: the model's reason and the operator's own conclusion
+  // about it are different claims, and a shortlist is unreadable if they blur.
+  // Indented to the width of the label, so the operator's own words stay in one
+  // column. Undimmed, unlike everything around it: theirs, not the model's.
+  if (note) console.log(`     ${dim("note:")} ${wrapped(note, " ".repeat(11)).trimStart()}`);
+}
+
+/**
+ * Scan history. The run row is the only durable record of what a scan looked at,
+ * and evaluating a query or source change asks for exactly these numbers — the
+ * tokens spent rather than a call count inferred from candidates. See
+ * docs/product/evaluation.md.
+ */
+async function runRuns(values: { project?: string; limit?: string }) {
+  const limit = intArg("limit", values.limit, 10);
+  const project = await resolveProjectFilter(values.project);
+  const rows = recentRuns({ project, limit });
+  if (!rows.length) {
+    console.log(
+      dim(
+        project
+          ? `No scans recorded for "${project}".`
+          : "No scans recorded. Run `obserf scan` first.",
+      ),
+    );
+    return;
+  }
+
+  for (const run of rows) {
+    const when = `${day(run.startedAt)} ${run.startedAt.toTimeString().slice(0, 5)}`;
+    // A row with no `finishedAt` was never closed: either the scan is still
+    // running or the process died under it. Both differ from a scan that ended
+    // and recorded an error, which has a duration and a message.
+    const took = run.finishedAt
+      ? duration(run.finishedAt.getTime() - run.startedAt.getTime())
+      : "unfinished";
+    console.log(
+      `${dim(`#${String(run.id).padEnd(4)}`)} ${when}  ${bold(run.project.padEnd(10))} ${dim(took)}` +
+        // In words, not only in red: a redirected or NO_COLOR listing has no colour.
+        (run.error !== null ? ` ${red("failed")}` : ""),
+    );
+
+    console.log(`     ${dim(describeSources(run.sources, run.skipped))}`);
+
+    // Totals and tokens are written only when a scan is finalized, so on an open
+    // row they are the insert's zeros, not a count of nothing: "0 candidates → 0
+    // assessed" for work that did happen is the misreport this command exists to
+    // prevent. The inbox withholds the counts too.
+    if (!run.finishedAt) {
+      console.log(`     ${dim("never finished, so its counts and token usage were not recorded")}`);
+    } else if (run.gated === null) {
+      // Finalized by a discovery failure. The candidates are real, but an arrow
+      // to "0 assessed" would say they went through a gate that never ran.
+      console.log(`     ${dim(`${run.candidates} candidates · the gate did not run`)}`);
+    } else {
+      const gates = gateDrops(run.gated);
+      console.log(
+        `     ${dim(
+          `${run.candidates} candidates → ${run.assessed} assessed` +
+            (gates ? ` (dropped: ${gates})` : ""),
+        )}`,
+      );
+    }
+    // Independent of `assessed`: a scan that failed partway still spent quota.
+    const spent = run.inputTokens + run.cacheReadTokens + run.cacheWriteTokens + run.outputTokens;
+    if (spent) console.log(`     ${dim(usageLine(run))}`);
+    if (run.inbox) {
+      console.log(`     ${dim(`top ${run.inbox.length} frozen · obserf list --run ${run.id}`)}`);
+    }
+    if (run.error) console.log(`     ${red(run.error)}`);
+  }
+}
+
+/**
+ * Null means the run never stored which sources ran, so it is reported as a
+ * selection; an empty map means every selected source ran.
+ */
+export function describeSources(
+  sources: readonly SourceId[],
+  skipped: Partial<Record<SourceId, string>> | null,
+): string {
+  if (skipped === null) return `selected ${sources.join(", ")} · no record of which ran`;
+  const ran = sources.filter((id) => !(id in skipped));
+  const missing = Object.entries(skipped).map(([id, reason]) => `${id} (${reason})`);
+  return [
+    ran.length ? `ran ${ran.join(", ")}` : "nothing ran",
+    missing.length ? `skipped ${missing.join(", ")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Nonzero gate rejections, as "3 duplicate, 10 stale". */
+function gateDrops(rejected: Record<string, number>): string {
+  return Object.entries(rejected)
+    .filter(([, n]) => n > 0)
+    .map(([rule, n]) => `${n} ${rule}`)
+    .join(", ");
+}
+
+function duration(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
 async function runShow(idArg: string | undefined) {
@@ -336,7 +1012,49 @@ async function runShow(idArg: string | undefined) {
   console.log(finding.url);
   console.log(
     dim(
-      `${finding.venue} · ${finding.sourceId} · ${describeAge(finding.publishedAt, assessment?.opportunity ?? null)} · status: ${status}`,
+      [
+        finding.project,
+        // The URL is directly above, so keep the venue only when it adds a label
+        // rather than repeating the host or a host-qualified path.
+        venueUnlessRedundant(finding.venue, finding.url),
+        finding.sourceId,
+        describeAge(finding.publishedAt, assessment?.opportunity ?? null),
+        `status: ${status}${view.dismissalCategory ? ` (${view.dismissalCategory})` : ""}`,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    ),
+  );
+  // What the model is told beyond the text. `reach` is judged where a reply would
+  // appear and `welcome` on whom it is addressed to, so disagreeing with either
+  // means seeing this.
+  const candidateFacts = [
+    finding.isThreadComment ? "one comment inside a thread, not the thread itself" : "",
+    finding.author ? `author: ${finding.author}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (candidateFacts) console.log(dim(candidateFacts));
+
+  // The finding's date above is the source's; this is about obserf's own
+  // record of it. The scan number is the link to `obserf runs`, which is where
+  // what that scan searched — and what it could not — is written down.
+  console.log(
+    dim(
+      [
+        `first seen ${day(finding.discoveredAt)}`,
+        finding.firstRunId ? `in scan #${finding.firstRunId}` : "",
+        // "updated", not "dismissed on": `setTriage` refreshes the timestamp for
+        // any write, so editing a note months later moves it without the status
+        // having changed. Shown only once the operator has ruled — every finding
+        // gets a triage row on insert, so on an untouched one this dates the
+        // scan rather than a decision.
+        status !== "new" && view.triageUpdatedAt
+          ? `· triage updated ${day(view.triageUpdatedAt)}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
     ),
   );
   // Show the operator the same evidence the model received, in the same terms.
@@ -372,25 +1090,39 @@ async function runShow(idArg: string | undefined) {
   }
 
   if (assessment) {
-    console.log(
-      `\n${bold(`Score ${assessment.score}`)}  ${dim(
-        `relevance ${assessment.relevance} · intent ${assessment.intent} · welcome ${assessment.welcome} · reach ${assessment.reach}`,
-      )}`,
-    );
-    console.log(`${assessment.opportunity ?? "?"} — ${assessment.reason}`);
-    if (assessment.disqualified) console.log("\x1b[31mDisqualified by the model.\x1b[0m");
+    console.log(`\n${bold(`Score ${scoreNow(view)}`)}  ${dim(components(assessment))}`);
+    console.log(wrapped(`${assessment.opportunity ?? "?"} — ${assessment.reason}`, ""));
+    if (assessment.disqualified) console.log(red("Disqualified by the model."));
+    console.log(dim(provenance(assessment)));
+
+    // The fingerprints show whether the rubric or brief changed between verdicts,
+    // not the candidate's formatting, which they leave out. The evidence each
+    // earlier one saw was not kept, so they cannot say why a verdict moved. No
+    // score: none is stored, and one computed now would apply today's weights and
+    // clock to a snapshot that was not kept.
+    const earlier = earlierAssessments(finding.id, assessment.id);
+    if (earlier.length) {
+      console.log(`\n${bold("Earlier assessments")} ${dim("(of snapshots not kept)")}`);
+      for (const row of earlier) {
+        // First, since the components alone neither imply it nor rule it out.
+        const flag = row.disqualified ? `${red("disqualified")} · ` : "";
+        console.log(`  ${flag}${dim(components(row))}`);
+        console.log(`      ${dim(provenance(row))}`);
+        console.log(dim(wrapped(`${row.opportunity ?? "?"} — ${row.reason}`, "      ")));
+      }
+    }
+  } else {
+    // Not dimmed: missing judgment is not secondary metadata.
+    console.log("\nNo assessment recorded.");
   }
 
-  if (note) console.log(`\n${dim("Note:")} ${note}`);
-  if (finding.excerpt) console.log(`\n${dim(finding.excerpt.slice(0, 800))}`);
-
-  const drafts = draftsFor(finding.id);
-  const profiles = drafts.length ? await loadProjectsIfAny() : [];
-
-  for (const draft of drafts) {
-    console.log(`\n${bold(`Draft (${draft.kind})`)} ${dim(draft.createdAt.toISOString())}`);
-    console.log(draft.body);
-  }
+  // Indented under the label, like the list's. The draft below is deliberately
+  // left alone: it is text to be copied, and a line break folded into it here
+  // would be pasted into the venue.
+  if (note) console.log(`\n${dim("Note:")} ${wrapped(note, " ".repeat(6)).trimStart()}`);
+  // `plainText` has already collapsed the source's own line breaks, so without
+  // this the excerpt is one 800-character paragraph against the margin.
+  if (finding.excerpt) console.log(`\n${dim(wrapped(finding.excerpt.slice(0, 800), ""))}`);
 
   // Under a stored draft as much as under a freshly written one, which is what
   // the inbox already does: this is the surface an operator re-reads a draft on
@@ -404,45 +1136,77 @@ async function runShow(idArg: string | undefined) {
   // every profile module — and tolerantly, because reading a finding back must
   // survive the retirement of the profile that produced it, including the last
   // one in the workspace.
+  const drafts = draftsFor(finding.id);
+  const profiles = drafts.length ? await loadProjectsIfAny() : [];
+
+  for (const draft of drafts) {
+    console.log(
+      `\n${bold(`Draft (${draft.kind})`)} ${dim(`${day(draft.createdAt)} · ${draft.model}`)}`,
+    );
+    console.log(contextLine(draft));
+    console.log(draft.body);
+  }
+
   if (drafts.length) {
     const project = profiles.find((p) => p.key === finding.project);
     console.log(`\n${venueReminder(finding, project)}`);
   }
 }
 
+/**
+ * What the draft was written against, printed with stored drafts too: re-reading
+ * one before posting is when it matters. Only a complete read is dimmed.
+ */
+function contextLine(draft: Draft): string {
+  const { text, complete } = draftContextNote(draft.contextSource, draft.contextWarning);
+  return complete ? dim(text) : text;
+}
+
+/** The four judgments, phrased identically wherever an assessment is printed. */
+function components(assessment: Assessment): string {
+  return `relevance ${assessment.relevance} · intent ${assessment.intent} · welcome ${assessment.welcome} · reach ${assessment.reach}`;
+}
+
+/**
+ * Which model and which rubric and brief produced a verdict. Labelled
+ * `rubric/brief`, not `prompt`: the fingerprint leaves out the candidate block.
+ */
+function provenance(assessment: Assessment): string {
+  return `assessed ${day(assessment.createdAt)} · ${assessment.model} · rubric/brief ${assessment.promptFingerprint}`;
+}
+
+/** `Sep 09 2026`, the same shape `obserf runs` prints. */
+function day(date: Date): string {
+  return date.toDateString().slice(4);
+}
+
 async function runDraft(idArg: string | undefined, kindArg: string | undefined) {
+  // Validated before the lookup, which opens the database: `$type<DraftKind>()`
+  // is a compile-time claim, and SQLite would happily store a typo.
+  const explicitKind = DRAFT_KINDS.find((kind) => kind === kindArg);
+  if (kindArg !== undefined && !explicitKind) {
+    throw new Error(`Unknown draft kind "${kindArg}". Use: ${DRAFT_KINDS.join(", ")}`);
+  }
   const view = requireFinding(idArg);
   // No opportunity type means the model named no moment to act on, and no draft
   // follows from that. `--kind` still works: drafting against a finding the
   // model rejected is the operator's call, made explicitly.
   const opportunity = view.assessment?.opportunity;
-  const kind = (kindArg ??
-    (opportunity
-      ? defaultKindFor(opportunity, view.finding.isThreadComment)
-      : null)) as DraftKind | null;
+  const kind =
+    explicitKind ??
+    (opportunity ? defaultKindFor(opportunity, view.finding.isThreadComment) : null);
   if (kind === null) {
     throw new Error(
       `#${view.finding.id} has no opportunity type, so there is no default draft for it. ` +
         `Pass --kind ${DRAFT_KINDS.join(" | ")} to write one anyway.`,
     );
   }
-  // Validated before the paid call: `$type<DraftKind>()` is a compile-time claim,
-  // and SQLite would happily store a typo.
-  if (!DRAFT_KINDS.includes(kind)) {
-    throw new Error(`Unknown draft kind "${kindArg}". Use: ${DRAFT_KINDS.join(", ")}`);
-  }
   const project = projectByKey(await loadProjects(), view.finding.project);
 
-  const result = await generateDraft(project, view.finding, kind, view.assessment?.reason);
+  const draft = await generateDraft(project, view.finding, kind, view.assessment?.reason);
   console.log(`${bold(`Draft (${kind}) for #${view.finding.id}`)} ${dim(view.finding.url)}`);
-  console.log(
-    dim(
-      result.contextVia
-        ? `read the live thread (${result.contextVia})\n`
-        : `could not read the live thread${result.contextWarning ? `: ${result.contextWarning}` : ""} — worked from the stored excerpt\n`,
-    ),
-  );
-  console.log(result.body);
+  console.log(`${contextLine(draft)}\n`);
+  console.log(draft.body);
   console.log(`\n${venueReminder(view.finding, project)}`);
 }
 
@@ -460,36 +1224,52 @@ function venueReminder(finding: Finding, project: ProjectProfile | undefined): s
     ? `No profile for "${finding.project}" any more, so whatever it recorded about ${venue} ` +
       "is unreadable — restore it, or read the venue's rules and what a submission requires."
     : rule
-      ? dim(
-          `Your verified note for ${venue}: ${rule}\n` +
-            "Confirm it still holds and that taking part costs nothing.",
-        )
+      ? `Your verified note for ${venue}: ${rule}\n` +
+        "Confirm it still holds and that taking part costs nothing."
       : `No verified guidance recorded for ${venue}. Obserf cannot check whether a mention is ` +
         "permitted there or what taking part costs — read the venue's rules and what a " +
-        "submission actually requires.";
-  return `${venueLine}\n${dim("Then edit it and post it yourself. Obserf never posts.")}`;
+        "submission actually requires. A rule you verify yourself goes in the profile's " +
+        "`venueGuidance`, with its source and the date you checked.";
+  // Broken to the window like the reasons and notes above it. This is the
+  // longest block the command prints and the one it prints last.
+  const shown = wrapped(venueLine, "");
+  return `${rule ? dim(shown) : shown}\n${dim("Then edit it and post it yourself. Obserf never posts.")}`;
 }
 
-function runTriage(idArg: string | undefined, statusArg: string | undefined, note?: string) {
-  const view = requireFinding(idArg);
-  const status = statusArg as TriageStatus;
-  if (!TRIAGE_STATUSES.includes(status)) {
-    throw new Error(`Unknown status "${statusArg}". Use: ${TRIAGE_STATUSES.join(", ")}`);
+function runTriage(
+  idArg: string | undefined,
+  statusArg: string | undefined,
+  note?: string,
+  categoryArg?: string,
+) {
+  // Before the lookup, which opens and upgrades the database.
+  if (statusArg === undefined) {
+    throw new Error(`Expected a status: \`obserf triage <id> ${TRIAGE_STATUSES.join("|")}\``);
   }
-  const previous = setTriage(view.finding.id, status, note);
-  console.log(`#${view.finding.id} ${previous ?? "new"} → ${status}`);
+  const status = triageStatus(statusArg);
+  const category = categoryArg === undefined ? undefined : dismissalCategory(categoryArg);
+  if (category && status !== "dismissed") {
+    throw new Error(`--category describes a dismissal; the status is "${status}".`);
+  }
+  const view = requireFinding(idArg);
+  const previous = setTriage(view.finding.id, { status, note, category });
+  console.log(
+    `#${view.finding.id} ${previous?.status ?? "new"} → ${status}${category ? ` (${category})` : ""}`,
+  );
+  // The point of naming a cause: the layer it names is where the next edit goes.
+  const fix = category && FIRST_FIX[category];
+  if (fix) console.log(dim(`First fix: ${fix}. See docs/product/evaluation.md.`));
 }
 
 /**
- * Current age for context, not the age used when the stored score was computed.
- * Rescoring refreshes decay without changing the assessment timestamp.
- * See docs/product/scoring.md; the inbox uses the same evergreen exemptions.
+ * The age the score beside it was decayed by. See docs/product/scoring.md; the
+ * inbox uses the same evergreen exemptions.
  */
 function describeAge(publishedAt: Date | null, opportunity: OpportunityType | null): string {
   if (!publishedAt) return "date unknown, not decayed";
   const days = Math.max(0, Math.floor((Date.now() - publishedAt.getTime()) / 86_400_000));
   const exempt = opportunity && EVERGREEN.has(opportunity);
-  return `${publishedAt.toDateString()} (${days}d ago${exempt ? ", evergreen" : ""})`;
+  return `${day(publishedAt)} (${days}d ago${exempt ? ", evergreen" : ""})`;
 }
 
 /**
@@ -538,14 +1318,25 @@ function runInit(dir?: string) {
 }
 
 function requireFinding(idArg: string | undefined) {
+  // Command-neutral: `draft` and `triage` reach this too, and were telling the
+  // operator to run `show`.
+  if (idArg === undefined) throw new Error("Expected a finding id, as `obserf list` prints them.");
+  // Digits only, as `list` prints them: `Number` also reads `1e2` as 100 and
+  // `0x10` as 16. Past 2^53 the parsed id is no longer the digits typed.
   const id = Number(idArg);
-  if (!Number.isInteger(id)) throw new Error("Expected a finding id, e.g. `obserf show 12`.");
+  if (!/^[1-9]\d*$/.test(idArg) || !Number.isSafeInteger(id)) {
+    throw new Error(`Expected a finding id like 12, not "${idArg}".`);
+  }
   const view = findingById(id);
   if (!view) throw new Error(`No finding #${id}.`);
   return view;
 }
 
-main().catch((error: unknown) => {
-  console.error(`\x1b[31m${error instanceof Error ? error.message : String(error)}\x1b[0m`);
-  process.exitCode = 1;
-});
+// True for `bun cli.ts`, `bun run obserf` and the installed bin shim; false when
+// a test imports a helper.
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error(stderrRed(error instanceof Error ? error.message : String(error)));
+    process.exitCode = 1;
+  });
+}

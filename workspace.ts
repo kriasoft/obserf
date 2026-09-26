@@ -26,7 +26,7 @@
  * before a workspace exists, and `obserf help` has to run outside one.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { WorkspaceConfig } from "./index";
 import type { ProjectProfile } from "./project";
@@ -84,25 +84,28 @@ export const databasePath: string = process.env.OBSERF_DB
 export const backupsDir: string = join(stateDir, "backups");
 
 /**
- * That a database may be created at `databasePath`, and that its directory
- * exists — the two halves of "you may write a new database here".
- *
- * The workspace's own is created on demand: `obserf init` then `obserf scan` is
- * the whole setup, and `obserf restore` can rebuild a workspace straight from a
- * snapshot. One named by `OBSERF_DB` is not: you set that to reach a database
- * you already have, so a typo has to fail rather than quietly become an empty
- * second one. Both the opener and the restorer answer to this, because a rule
- * stated twice is a rule that drifts.
+ * That a command may reach `databasePath`: there is a workspace, and a database
+ * named by `OBSERF_DB` exists. That variable is set to reach a database you have,
+ * so a typo must fail rather than read as empty or become a second database. The
+ * workspace's own may be absent: `obserf init` then `obserf scan` is the setup.
  */
-export function requireCreatableDatabase(): void {
+export function requireReachableDatabase(): void {
   requireWorkspace();
-  if (existsSync(databasePath)) return;
-  if (process.env.OBSERF_DB) {
+  if (process.env.OBSERF_DB && !existsSync(databasePath)) {
     throw new Error(
       `No database at ${databasePath} (OBSERF_DB). Unset it to use the workspace's own.`,
     );
   }
-  mkdirSync(dirname(databasePath), { recursive: true });
+}
+
+/**
+ * That a database may be created at `databasePath`, and its directory exists.
+ * The opener and `obserf restore`, which can rebuild a workspace from a snapshot,
+ * answer to this; the dry run, which creates nothing, only to the check above.
+ */
+export function requireCreatableDatabase(): void {
+  requireReachableDatabase();
+  if (!existsSync(databasePath)) mkdirSync(dirname(databasePath), { recursive: true });
 }
 
 /** Fails with the path it looked at, because "no workspace" is usually "wrong directory". */
@@ -138,6 +141,60 @@ export async function loadProjects(root: string = workspaceRoot): Promise<Projec
  */
 export async function loadProjectsIfAny(root: string = workspaceRoot): Promise<ProjectProfile[]> {
   return readProfiles(await requireProfilesDir(root));
+}
+
+/**
+ * Profiles that follow edits, for `serve`: its loop is "bad finding → edit
+ * `notFor` → look again", and a restart the operator has to remember breaks it
+ * silently. Each call compares content hashes rather than watching files, so
+ * there is no watcher to leak or miss an event; it sees files at rest, not a
+ * transactional snapshot.
+ *
+ * The first load throws, as a startup failure. A later failure keeps the last
+ * good profiles and reports `profileError`, which refuses drafts — a draft from
+ * the version just replaced is what the edit was meant to stop — and is retried
+ * on the next call. A module the config or a profile imports stays cached.
+ */
+export async function liveProfiles(root: string = workspaceRoot) {
+  const load = async () => {
+    // Stamped before importing: a stamp taken after could describe an edit the
+    // import missed, and that edit would never load. The other way round costs
+    // one extra reload.
+    const config = fileState(join(root, MARKER));
+    const dir = await requireProfilesDir(root);
+    const stamp = profileStamp(dir, config);
+    return { dir, stamp, projects: await readProfiles(dir) };
+  };
+  let loaded = await load();
+  let profileError: string | null = null;
+  let reloading: Promise<void> | null = null;
+  const reload = async () => {
+    try {
+      loaded = await load();
+      profileError = null;
+    } catch (cause) {
+      profileError = cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+
+  return async (): Promise<{ projects: ProjectProfile[]; profileError: string | null }> => {
+    // A call arriving mid-reload waits for it, then looks again for an edit made
+    // meanwhile: answering with the replaced profiles and no error would let a
+    // draft use them. A failed reload answers at once.
+    for (;;) {
+      if (!reloading) {
+        const current = profileStamp(loaded.dir, fileState(join(root, MARKER)));
+        if (profileError === null && current === loaded.stamp) {
+          return { projects: loaded.projects, profileError };
+        }
+        reloading = reload().finally(() => {
+          reloading = null;
+        });
+      }
+      await reloading;
+      if (profileError !== null) return { projects: loaded.projects, profileError };
+    }
+  };
 }
 
 async function requireProfilesDir(root: string): Promise<string> {
@@ -260,8 +317,46 @@ const record = (value: unknown): value is Record<string, unknown> => {
 };
 
 async function importDefault<T>(file: string): Promise<T | undefined> {
-  const module = (await import(file)) as { default?: T };
+  // Imports are cached for the life of the process. A query string the file's
+  // content determines is a distinct module to Bun, so an edited file is
+  // evaluated again and an unchanged one is not. The real path, because Bun
+  // 1.4 can fail to find a file added to a directory it has already resolved
+  // through a symlink, such as macOS's `/var`.
+  const real = realpathSync(file);
+  const module = (await import(`${real}?v=${fileHash(real)}`)) as { default?: T };
   return module.default;
+}
+
+function fileHash(file: string): string {
+  return Bun.hash(readFileSync(file)).toString(36);
+}
+
+/**
+ * A file's identity by content, not by mtime and size: an edit of the same
+ * length inside one timestamp tick would otherwise read as no edit, and leave
+ * either stale prompt text or a fixed profile still refused. Profiles are small.
+ */
+function fileState(file: string): string {
+  try {
+    return fileHash(file);
+  } catch {
+    return "missing";
+  }
+}
+
+function profileStamp(dir: string, config: string): string {
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((name) => name.endsWith(".ts"));
+  } catch {
+    // Not `[config]`, which an empty directory also produces: losing the last
+    // profile's directory must force the reload that reports it.
+    return JSON.stringify([config, null]);
+  }
+  return JSON.stringify([
+    config,
+    ...names.sort().map((name) => [name, fileState(join(dir, name))]),
+  ]);
 }
 
 /** The profile for a key, or an error naming the ones that exist. */

@@ -15,7 +15,7 @@
 The installed engine owns the database's whole lifecycle.
 
 - `bun run db:generate` renders a change to `db/schema.ts` into a numbered SQL file under `drizzle/`. It is a maintainer command; the generated files are committed and ship with the package.
-- `db/migrate.ts` applies whatever is pending every time the database is opened for writing. Opening one that does not exist creates it, so `obserf init` then `obserf scan` is the entire setup.
+- `db/migrate.ts` applies whatever is pending every time the database is opened through the shared connection in `db/index.ts`. Opening one that does not exist creates it, so `obserf init` then `obserf scan` is the entire setup. `scan --dry-run` is the one path that reads the database without it, deliberately: a dry run must not upgrade anything.
 - `drizzle-kit push` is gone rather than kept for development. Two mechanisms would let a maintainer's database drift off the history that every shipped database follows, and the drift would surface as a migration that works locally and fails everywhere else.
 
 The runtime needs guarantees drizzle-orm's own migrator does not provide, which is why `db/migrate.ts` is its own small apply loop rather than a call to it:

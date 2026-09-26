@@ -7,11 +7,12 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { existsSync, statSync } from "node:fs";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
+import { union } from "drizzle-orm/sqlite-core";
 import * as schema from "./schema";
-import type { TriageStatus } from "../vocabulary";
+import type { DismissalCategory, LatestScanMark, TriageStatus } from "../vocabulary";
 
 /**
  * What storage knows for the gate's history checks, plus stable URL shape that
@@ -27,7 +28,12 @@ type KnownFindingState = Pick<
   disqualified: boolean;
 };
 
-import { databasePath, requireCreatableDatabase, requireWorkspace } from "../workspace";
+import {
+  databasePath,
+  requireCreatableDatabase,
+  requireReachableDatabase,
+  requireWorkspace,
+} from "../workspace";
 import { migrate } from "./migrate";
 
 export { databasePath };
@@ -88,6 +94,13 @@ export interface FindingView {
   assessment: schema.Assessment | null;
   status: TriageStatus;
   note: string | null;
+  dismissalCategory: DismissalCategory | null;
+  firstDecidedHidden: boolean | null;
+}
+
+interface FindingDetail extends FindingView {
+  /** When the triage row was last written, for any reason. Null only without a row. */
+  triageUpdatedAt: Date | null;
 }
 
 /**
@@ -97,21 +110,28 @@ export interface FindingView {
  */
 export interface ListedFinding extends FindingView {
   drafts: number;
+  /**
+   * What the project's latest scan did to it, so a review can start with what
+   * changed: `new` if that scan first stored it, `reassessed` if it wrote the
+   * current verdict. Null for everything older, or with no scan recorded.
+   */
+  latestScan: LatestScanMark | null;
 }
 
 export interface ListOptions {
   project?: string;
   status?: TriageStatus[];
-  minScore?: number;
-  limit?: number;
+  /** Only these findings, e.g. a run's frozen inbox. */
+  ids?: number[];
 }
 
-/** Findings with their latest assessment and current triage status, best first. */
-export function latestFindings(options: ListOptions = {}): ListedFinding[] {
-  const { project, status, minScore, limit = 50 } = options;
-
-  // Append-only assessments mean max(id) is the newest without a tie-break on time.
-  const latest = db
+/**
+ * Each finding's newest assessment id, as a joinable subquery. Assessments are
+ * append-only, so max(id) is the newest. Shared so the inbox and the gate agree
+ * on which verdict is current.
+ */
+function latestAssessmentIds(database: ReturnType<typeof drizzle>) {
+  return database
     .select({
       findingId: schema.assessments.findingId,
       assessmentId: sql<number>`max(${schema.assessments.id})`.as("assessment_id"),
@@ -119,11 +139,26 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
     .from(schema.assessments)
     .groupBy(schema.assessments.findingId)
     .as("latest");
+}
+
+/**
+ * Findings with their latest assessment and current triage status, unordered and
+ * unbounded: the order is the score now, which is arithmetic over the clock, so
+ * `rank` in pipeline/score.ts orders, filters and bounds them after the read.
+ */
+export function latestFindings(options: ListOptions = {}): ListedFinding[] {
+  const { project, status, ids } = options;
+
+  const latest = latestAssessmentIds(db);
 
   const filters = [
     project ? eq(schema.findings.project, project) : undefined,
-    status?.length ? inArray(schema.triage.status, status) : undefined,
-    minScore !== undefined ? gte(schema.assessments.score, minScore) : undefined,
+    // The same fallback the rows below report, or a finding shown as `new` would
+    // be excluded by `--status new`.
+    status?.length
+      ? inArray(sql<TriageStatus>`coalesce(${schema.triage.status}, 'new')`, status)
+      : undefined,
+    ids ? inArray(schema.findings.id, ids) : undefined,
   ].filter((f) => f !== undefined);
 
   const rows = db
@@ -132,6 +167,8 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
       assessment: schema.assessments,
       status: schema.triage.status,
       note: schema.triage.note,
+      dismissalCategory: schema.triage.dismissalCategory,
+      firstDecidedHidden: schema.triage.firstDecidedHidden,
       drafts: sql<number>`(select count(*) from ${schema.drafts} where ${schema.drafts.findingId} = ${schema.findings.id})`,
     })
     .from(schema.findings)
@@ -139,79 +176,223 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
     .leftJoin(schema.assessments, eq(schema.assessments.id, latest.assessmentId))
     .leftJoin(schema.triage, eq(schema.triage.findingId, schema.findings.id))
     .where(filters.length ? and(...filters) : undefined)
-    // `id` last: two assessments can share a stored timestamp, and without a
-    // monotonic tie-break their order is unspecified.
-    .orderBy(
-      desc(schema.assessments.score),
-      desc(schema.assessments.createdAt),
-      desc(schema.assessments.id),
-    )
-    .limit(limit)
     .all();
 
+  const latestRuns = new Map(latestRunPerProject().map((run) => [run.project, run]));
   return rows.map((row) => ({
     finding: row.finding,
     assessment: row.assessment,
+    latestScan: latestScanMark(row.finding, row.assessment, latestRuns.get(row.finding.project)),
     // A finding always gets a triage row on insert; the fallback covers a row
     // written before that invariant existed rather than a normal path.
     status: row.status ?? "new",
     note: row.note ?? null,
+    dismissalCategory: row.dismissalCategory ?? null,
+    firstDecidedHidden: row.firstDecidedHidden ?? null,
     drafts: row.drafts,
   }));
 }
 
-export function findingById(id: number): FindingView | undefined {
-  const finding = db.select().from(schema.findings).where(eq(schema.findings.id, id)).get();
-  if (!finding) return undefined;
+/**
+ * By run id on both sides, never by time: timestamps share a second, and scans
+ * of one project can overlap. A verdict recorded before assessments named their
+ * run is never marked, which undercounts rather than guesses.
+ */
+export function latestScanMark(
+  finding: Pick<schema.Finding, "firstRunId">,
+  assessment: Pick<schema.Assessment, "runId"> | null,
+  run: Pick<schema.Run, "id"> | undefined,
+): LatestScanMark | null {
+  if (!run) return null;
+  if (finding.firstRunId === run.id) return "new";
+  if (assessment?.runId === run.id) return "reassessed";
+  return null;
+}
 
-  const assessment = db
-    .select()
-    .from(schema.assessments)
-    .where(eq(schema.assessments.findingId, id))
-    .orderBy(desc(schema.assessments.id))
+/**
+ * One statement, so the snapshot and the verdict are read from one database
+ * snapshot: a scan writes both in one transaction, and separate reads could pair
+ * the old snapshot with the new verdict.
+ */
+export function findingById(id: number): FindingDetail | undefined {
+  const latest = latestAssessmentIds(db);
+  const row = db
+    .select({
+      finding: schema.findings,
+      assessment: schema.assessments,
+      status: schema.triage.status,
+      triageUpdatedAt: schema.triage.updatedAt,
+      note: schema.triage.note,
+      dismissalCategory: schema.triage.dismissalCategory,
+      firstDecidedHidden: schema.triage.firstDecidedHidden,
+    })
+    .from(schema.findings)
+    .leftJoin(latest, eq(latest.findingId, schema.findings.id))
+    .leftJoin(schema.assessments, eq(schema.assessments.id, latest.assessmentId))
+    .leftJoin(schema.triage, eq(schema.triage.findingId, schema.findings.id))
+    .where(eq(schema.findings.id, id))
     .get();
-
-  const row = db.select().from(schema.triage).where(eq(schema.triage.findingId, id)).get();
+  if (!row) return undefined;
 
   return {
-    finding,
-    assessment: assessment ?? null,
-    status: row?.status ?? "new",
-    note: row?.note ?? null,
+    finding: row.finding,
+    assessment: row.assessment,
+    status: row.status ?? "new",
+    triageUpdatedAt: row.triageUpdatedAt ?? null,
+    note: row.note ?? null,
+    dismissalCategory: row.dismissalCategory ?? null,
+    firstDecidedHidden: row.firstDecidedHidden ?? null,
   };
 }
 
 /**
- * The operator's decision. `note` has three states, and the difference matters:
- * a string replaces the stored note, `null` clears it, and `undefined` leaves it
- * alone — Drizzle omits an undefined column from the update, which is what lets
- * `obserf triage <id> shortlisted` change a status without erasing the reasoning
- * already written against it.
+ * A finding's assessments older than `beforeAssessmentId`, newest first. Bounded by the
+ * current verdict's id so one a scan writes after it was read is never filed as
+ * earlier.
+ */
+export function earlierAssessments(
+  findingId: number,
+  beforeAssessmentId: number,
+): schema.Assessment[] {
+  return db
+    .select()
+    .from(schema.assessments)
+    .where(
+      and(
+        eq(schema.assessments.findingId, findingId),
+        lt(schema.assessments.id, beforeAssessmentId),
+      ),
+    )
+    .orderBy(desc(schema.assessments.id))
+    .all();
+}
+
+export interface TriageChange {
+  status: TriageStatus;
+  /** A string replaces the stored note, `null` clears it, omitted leaves it alone. */
+  note?: string | null;
+  /**
+   * A line added to the end of the stored note, in the same statement that reads
+   * it, so an edit saved since the caller last saw the note is kept. Exclusive
+   * with `note`.
+   */
+  appendNote?: string;
+  /**
+   * The same three states, while the status is `dismissed`. Any other status
+   * clears it: a category describes a dismissal, and one surviving a reopening
+   * would be counted as a cause for a finding nobody dismissed. Given with
+   * another status it is refused, so no front end can store it.
+   */
+  category?: DismissalCategory | null;
+  /**
+   * Whether the model's judgment was hidden while this was decided. Recorded
+   * only on a finding's first decision out of `new`; omitted means it was shown,
+   * which is true of the CLI, whose `list` and `show` print the reason.
+   */
+  hidden?: boolean;
+  /**
+   * An amendment to the decision already stored — a dismissal's category, a line
+   * after `acted` — rather than a new one: written only while the stored status
+   * is still `status`, since another front end may have changed it meanwhile.
+   * Throws `DecisionChanged` otherwise, having written nothing.
+   */
+  amend?: boolean;
+}
+
+/** An amendment found its decision already changed by someone else. */
+export class DecisionChanged extends Error {
+  constructor(findingId: number, expected: TriageStatus, found: TriageStatus | undefined) {
+    super(`#${findingId} is ${found ?? "new"} now, not ${expected}; nothing was changed.`);
+    this.name = "DecisionChanged";
+  }
+}
+
+/**
+ * The operator's decision. Omitted fields are left as stored — Drizzle drops an
+ * undefined column from the update — which is what lets `obserf triage <id>
+ * shortlisted` change a status without erasing the reasoning written against it.
  *
- * Returns the status this replaced, so a caller can report or undo the change.
- * `returning()` would give the new status. This separate read is not atomic
- * with the write; another process can change the status between them.
+ * Returns the decision this replaced — status and dismissal category — so a
+ * caller can report the change or undo it whole; undoing a keystroke that moved
+ * a `paid` dismissal must not come back as a dismissal with no cause. Undefined
+ * when there was no triage row. The read and the write are separate statements,
+ * so another process can change the row between them.
  */
 export function setTriage(
   findingId: number,
-  status: TriageStatus,
-  note?: string | null,
-): TriageStatus | undefined {
+  change: TriageChange,
+): { status: TriageStatus; category: DismissalCategory | null } | undefined {
+  const { status, note, appendNote, category, hidden = false, amend = false } = change;
+  if (note !== undefined && appendNote !== undefined) {
+    throw new Error("Pass a note or a line to append to it, not both.");
+  }
+  if (category && status !== "dismissed") {
+    throw new Error(`A dismissal category needs status "dismissed", not "${status}".`);
+  }
+
   const previous = db
-    .select({ status: schema.triage.status })
+    .select({
+      status: schema.triage.status,
+      dismissalCategory: schema.triage.dismissalCategory,
+    })
     .from(schema.triage)
     .where(eq(schema.triage.findingId, findingId))
-    .get()?.status;
+    .get();
+
+  const values = {
+    status,
+    note,
+    dismissalCategory: status === "dismissed" ? category : null,
+    updatedAt: new Date(),
+  };
+  // Whether this is the first decision out of `new` is judged against the row
+  // as the update finds it, not as it was read above: two writers deciding at
+  // once (the CLI and the inbox) would otherwise both see `new` and the second
+  // would overwrite what the first recorded. SQLite evaluates every SET
+  // expression against the pre-update row.
+  const firstDecidedHidden =
+    status === "new"
+      ? {}
+      : {
+          firstDecidedHidden: sql`case when ${schema.triage.status} = 'new'
+                    and ${schema.triage.firstDecidedHidden} is null
+                    then ${hidden ? 1 : 0} else ${schema.triage.firstDecidedHidden} end`,
+        };
+  const appended =
+    appendNote === undefined
+      ? {}
+      : {
+          note: sql`case when coalesce(${schema.triage.note}, '') = '' then ${appendNote}
+                    else ${schema.triage.note} || char(10) || ${appendNote} end`,
+        };
+  if (amend) {
+    // Conditional in the statement, not on the read above, which another
+    // writer can have made stale.
+    const amended = db
+      .update(schema.triage)
+      .set({ ...values, ...appended })
+      .where(and(eq(schema.triage.findingId, findingId), eq(schema.triage.status, status)))
+      .returning({ findingId: schema.triage.findingId })
+      .get();
+    if (!amended) throw new DecisionChanged(findingId, status, previous?.status);
+    return previous && { status: previous.status, category: previous.dismissalCategory };
+  }
 
   db.insert(schema.triage)
-    .values({ findingId, status, note, updatedAt: new Date() })
+    .values({
+      findingId,
+      ...values,
+      ...(appendNote === undefined ? {} : { note: appendNote }),
+      // No row yet means no decision yet, so this one is the first.
+      ...(status === "new" ? {} : { firstDecidedHidden: hidden }),
+    })
     .onConflictDoUpdate({
       target: schema.triage.findingId,
-      set: { status, note, updatedAt: new Date() },
+      set: { ...values, ...appended, ...firstDecidedHidden },
     })
     .run();
 
-  return previous;
+  return previous && { status: previous.status, category: previous.dismissalCategory };
 }
 
 /**
@@ -221,17 +402,67 @@ export function setTriage(
  * is worth looking at again.
  */
 export function knownFindings(project: string): Map<string, KnownFindingState> {
-  // Append-only assessments mean max(id) is the newest, as in `latestFindings`.
-  const latest = db
-    .select({
-      findingId: schema.assessments.findingId,
-      assessmentId: sql<number>`max(${schema.assessments.id})`.as("assessment_id"),
-    })
-    .from(schema.assessments)
-    .groupBy(schema.assessments.findingId)
-    .as("latest");
+  return knownFindingsIn(db, project);
+}
 
-  const rows = db
+/**
+ * `knownFindings` through a private connection, for `scan --dry-run`: opening the
+ * shared one migrates the database and switches it to WAL, and a dry run must
+ * change nothing. `query_only` refuses SQL writes.
+ *
+ * Read-write anyway: Bun's read-only open (measured on 1.4.2) fails with "unable
+ * to open database file" on a WAL database whose `-wal` and `-shm` are gone —
+ * the usual state after a clean close on Linux and Windows, or of a copied file.
+ * So SQLite may still create sidecars and checkpoint on close; what holds is no
+ * SQL write and no migration.
+ *
+ * Failures propagate: operators record a dry run's survivor count
+ * (`docs/product/evaluation.md`), and one computed from unreadable history is
+ * wrong, not conservative.
+ *
+ * `path` is for tests, which need a WAL database with no live connection.
+ */
+export function knownFindingsForDryRun(
+  project: string,
+  path: string = databasePath,
+): Map<string, KnownFindingState> {
+  // The opener's rule minus creation: a mistyped `OBSERF_DB` fails instead of
+  // reading as empty history. Test paths skip it.
+  if (path === databasePath) requireReachableDatabase();
+  // Only a missing file is empty history; `existsSync` would also answer false
+  // for one it could not stat.
+  if (!statSync(path, { throwIfNoEntry: false })) return new Map();
+
+  let handle: Database | undefined;
+  try {
+    handle = new Database(path, { readwrite: true, create: false });
+    // Wait out a concurrent scan's lock rather than fail on it.
+    handle.exec("PRAGMA busy_timeout = 10000");
+    handle.exec("PRAGMA query_only = ON");
+    return knownFindingsIn(drizzle(handle, { schema, casing: "snake_case" }), project);
+  } catch (error) {
+    // Dry runs never migrate, so an older schema is the likeliest cause.
+    throw new Error(
+      `Could not read what is already known from ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }. If this database predates the installed obserf, run \`obserf list\` once to upgrade it.`,
+      { cause: error },
+    );
+  } finally {
+    // `true` finalizes Drizzle's prepared statements; without it the connection
+    // outlives `close()` until they are collected.
+    handle?.close(true);
+  }
+}
+
+/** One query for both connections, so a dry run's gate counts cannot drift from a scan's. */
+function knownFindingsIn(
+  database: ReturnType<typeof drizzle>,
+  project: string,
+): Map<string, KnownFindingState> {
+  const latest = latestAssessmentIds(database);
+
+  const rows = database
     .select({
       url: schema.findings.url,
       title: schema.findings.title,
@@ -265,62 +496,76 @@ export function knownFindings(project: string): Map<string, KnownFindingState> {
   );
 }
 
+/** Stored scans, newest first by id, which only increases, rather than by a clock that can move. */
+export function recentRuns(options: { project?: string; limit?: number } = {}): schema.Run[] {
+  const { project, limit = 10 } = options;
+  return db
+    .select()
+    .from(schema.runs)
+    .where(project ? eq(schema.runs.project, project) : undefined)
+    .orderBy(desc(schema.runs.id))
+    .limit(limit)
+    .all();
+}
+
+export function assessmentsByIds(ids: number[]): schema.Assessment[] {
+  if (!ids.length) return [];
+  return db.select().from(schema.assessments).where(inArray(schema.assessments.id, ids)).all();
+}
+
+export function runById(id: number): schema.Run | undefined {
+  return db.select().from(schema.runs).where(eq(schema.runs.id, id)).get();
+}
+
 /**
- * Same as `knownFindings`, through a separate read-only connection: no WAL
- * switch or schema changes. This is what `scan --dry-run` uses so it can report
- * history-aware counts without database writes.
- *
- * Returns an empty map when there is no database, or when the file predates the
- * schema: for a dry run, an unreadable history means "nothing known", which
- * over-reports new candidates rather than hiding them.
+ * The most recent scan of each project, newest first. By id, as in `recentRuns`:
+ * timestamps can tie at a stored second, or go back.
  */
-export function knownFindingsReadOnly(project: string): Map<string, KnownFindingState> {
-  if (!existsSync(databasePath)) return new Map();
-  let handle: Database | undefined;
-  try {
-    handle = new Database(databasePath, { readonly: true });
-    const rows = handle
-      .query(
-        `SELECT f.url, f.title, f.excerpt, f.metrics, f.is_thread_comment,
-                COALESCE(t.status, 'new') AS status,
-                a.created_at AS last_assessed_at,
-                a.disqualified AS disqualified
-           FROM findings f
-           LEFT JOIN triage t ON t.finding_id = f.id
-           LEFT JOIN assessments a
-                  ON a.id = (SELECT max(id) FROM assessments WHERE finding_id = f.id)
-          WHERE f.project = ?`,
-      )
-      .all(project) as Array<{
-      url: string;
-      title: string;
-      excerpt: string;
-      metrics: string | null;
-      is_thread_comment: number | null;
-      status: TriageStatus;
-      last_assessed_at: number | null;
-      disqualified: number | null;
-    }>;
-    return new Map(
-      rows.map((row) => [
-        row.url,
-        {
-          status: row.status,
-          // Raw SQLite, so timestamps and booleans arrive unhydrated.
-          lastAssessedAt: row.last_assessed_at ? new Date(row.last_assessed_at * 1000) : null,
-          disqualified: row.disqualified === 1,
-          title: row.title,
-          excerpt: row.excerpt,
-          metrics: row.metrics ? (JSON.parse(row.metrics) as schema.Finding["metrics"]) : null,
-          isThreadComment: row.is_thread_comment === null ? null : row.is_thread_comment === 1,
-        },
-      ]),
-    );
-  } catch {
-    return new Map();
-  } finally {
-    handle?.close();
-  }
+export function latestRunPerProject(): schema.Run[] {
+  const newest = db
+    .select({ id: sql<number>`max(${schema.runs.id})` })
+    .from(schema.runs)
+    .groupBy(schema.runs.project);
+
+  return db
+    .select()
+    .from(schema.runs)
+    .where(inArray(schema.runs.id, newest))
+    .orderBy(desc(schema.runs.id))
+    .all();
+}
+
+/**
+ * Project keys the database holds rows for, sorted.
+ *
+ * Retiring a profile keeps its findings, runs and triage (ADR-002), so a command
+ * reading stored rows answers to this list as well as to the profiles. Runs
+ * count too: a scan that found nothing still happened.
+ */
+export function storedProjects(): string[] {
+  const rows = union(
+    db.select({ project: schema.findings.project }).from(schema.findings),
+    db.select({ project: schema.runs.project }).from(schema.runs),
+  ).all();
+  return rows.map((row) => row.project).sort();
+}
+
+/**
+ * What the database holds for a project, or for all of them — for an empty list:
+ * no run rows, run rows but no findings, or findings excluded by filters.
+ */
+export function storedCounts(project?: string): { findings: number; runs: number } {
+  const findings = db
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.findings)
+    .where(project ? eq(schema.findings.project, project) : undefined)
+    .get();
+  const runs = db
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.runs)
+    .where(project ? eq(schema.runs.project, project) : undefined)
+    .get();
+  return { findings: findings?.n ?? 0, runs: runs?.n ?? 0 };
 }
 
 export function draftsFor(findingId: number): schema.Draft[] {

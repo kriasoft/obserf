@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/kriasoft/obserf/security/advisories/new
+    about: Privately. See SECURITY.md for what is in scope — a bad draft is a quality problem, not a vulnerability.

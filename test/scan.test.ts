@@ -101,3 +101,93 @@ describe("scan", () => {
     expect(latestRun().skipped).toEqual({});
   });
 });
+
+/**
+ * The cohort the bar is judged on. Seeded with findings an earlier scan stored,
+ * because the inbox a scan leaves is not only what that scan assessed.
+ */
+describe("the frozen inbox", () => {
+  const frozen = defineProject({ ...project, key: "frozen-inbox" });
+  let seeded = 0;
+  const seed = (relevance: number, status: "new" | "shortlisted" | "dismissed" | "acted") => {
+    const id = db
+      .insert(schema.findings)
+      .values({
+        project: frozen.key,
+        sourceId: "hn",
+        url: `https://example.com/frozen/${++seeded}`,
+        title: "t",
+        venue: "example.com",
+        discoveredAt: new Date(),
+      })
+      .returning()
+      .get().id;
+    db.insert(schema.assessments)
+      .values({
+        findingId: id,
+        model: "m",
+        promptFingerprint: "f",
+        relevance,
+        intent: 3,
+        welcome: 3,
+        reach: 3,
+        opportunity: "discussion",
+        reason: "r",
+        createdAt: new Date(),
+      })
+      .run();
+    db.insert(schema.triage).values({ findingId: id, status }).run();
+    return id;
+  };
+  const withEmptyHn = async (run: () => Promise<unknown>) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (_input: URL) =>
+      new Response(JSON.stringify({ hits: [] }), {
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+    try {
+      await run();
+    } finally {
+      globalThis.fetch = real;
+    }
+  };
+  const runOf = () =>
+    db
+      .select()
+      .from(schema.runs)
+      .where(eq(schema.runs.project, frozen.key))
+      .orderBy(desc(schema.runs.id))
+      .get()!;
+
+  test("holds the undecided top, best first, as scored when the scan finished", async () => {
+    const weak = seed(2, "new");
+    const strong = seed(5, "new");
+    const middle = seed(4, "new");
+    // Decided in an earlier review: this scan's ranking cannot take credit for them.
+    seed(5, "shortlisted");
+    seed(5, "acted");
+    seed(5, "dismissed");
+    seed(0, "new"); // Zero, which the inbox hides.
+    for (let i = 0; i < 10; i++) seed(1, "new"); // Past the tenth place.
+
+    await withEmptyHn(() => scan(frozen, { sourceIds: ["hn"] }));
+
+    const inbox = runOf().inbox!;
+    expect(inbox).toHaveLength(10);
+    expect(inbox.slice(0, 3).map((entry) => entry.findingId)).toEqual([strong, middle, weak]);
+    expect(inbox[0]!.score).toBeGreaterThan(inbox[1]!.score);
+    // The verdict each was ranked on, for the model and prompt behind the cohort.
+    const [top] = db
+      .select()
+      .from(schema.assessments)
+      .where(eq(schema.assessments.id, inbox[0]!.assessmentId))
+      .all();
+    expect(top?.findingId).toBe(strong);
+  });
+
+  test("is not recorded for a scan that did not finish cleanly", async () => {
+    delete process.env.BRAVE_API_KEY;
+    await expect(scan(frozen, { sourceIds: ["brave"] })).rejects.toThrow(/No source could run/);
+    expect(runOf().inbox).toBeNull();
+  });
+});

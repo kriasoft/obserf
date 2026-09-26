@@ -79,3 +79,49 @@ export function score(
 
   return Math.round(100 * weighted * freshness(publishedAt, components.opportunity, now));
 }
+
+/**
+ * The fields `rank` reads. Structural, so storage can hand its rows over without
+ * `db/` importing this module.
+ */
+interface Rankable {
+  finding: { publishedAt: Date | null };
+  assessment: (ScoreComponents & { id: number; createdAt: Date }) | null;
+}
+
+/**
+ * Orders findings by their score now. No score is stored: one fixed at
+ * assessment would leave a thread assessed a month ago carrying its day-one
+ * freshness against one assessed this morning, so the order would say more about
+ * when each was scanned than about what is worth reading — and a weight change
+ * would need a maintenance command to reach the inbox. Scoring every row on each
+ * read is cheap at the size of one operator's database: hundreds of rows.
+ *
+ * `minScore` and `limit` apply after scoring, which is why they are here and not
+ * in the query. A finding without an assessment scores zero and sorts last.
+ */
+export function rank<T extends Rankable>(
+  rows: T[],
+  options: { minScore?: number; limit?: number; now?: Date } = {},
+): Array<T & { score: number }> {
+  const { minScore = 0, limit = Infinity, now = new Date() } = options;
+  return (
+    rows
+      .map((row) => ({ ...row, score: scoreNow(row, now) }))
+      .filter((row) => row.score >= minScore)
+      // Newest verdict first among equals, then `id`: two assessments can share a
+      // stored timestamp, and without a monotonic tie-break their order is unspecified.
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (b.assessment?.createdAt.getTime() ?? 0) - (a.assessment?.createdAt.getTime() ?? 0) ||
+          (b.assessment?.id ?? 0) - (a.assessment?.id ?? 0),
+      )
+      .slice(0, limit)
+  );
+}
+
+/** One finding's score at `now`: zero without an assessment. */
+export function scoreNow(row: Rankable, now = new Date()): number {
+  return row.assessment ? score(row.assessment, row.finding.publishedAt, now) : 0;
+}

@@ -10,7 +10,7 @@ A scan across four sources and a dozen queries returns a few hundred candidates.
 
 ## Decision
 
-`pipeline/gate.ts` runs before any model call and applies seven rules in order: **duplicate** (another candidate for the canonical URL already reached the history rules in this batch, whether or not it survived them), **settled** (the operator dismissed or acted on it), **blocked** (host or path on the project's or global blocklist), **stale** (older than the age cutoff), **thin** (title plus excerpt below a minimum length), **unchanged** (known, not disqualified, materially unchanged, and assessed recently), and **ruled-out** (the latest verdict disqualified it, its longer reassessment interval has not expired, and the candidate has not materially changed).
+`pipeline/gate.ts` runs before any model call and applies seven rules in order: **duplicate** (another candidate for the canonical URL already reached the history rules in this batch, whether or not it survived them), **settled** (the operator skipped, dismissed or acted on it), **blocked** (host or path on the project's or global blocklist), **stale** (older than the age cutoff), **thin** (title plus excerpt below a minimum length), **unchanged** (known, not disqualified, materially unchanged, and assessed recently), and **ruled-out** (the latest verdict disqualified it, its longer reassessment interval has not expired, and the candidate has not materially changed).
 
 **settled** and **ruled-out** honor an existing decision: the operator's status, or the model's latest verdict. The gate makes no new judgment.
 

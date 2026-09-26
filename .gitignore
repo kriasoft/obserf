@@ -34,7 +34,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 
 
-# personal notes and prompts
+# personal notes and prompts, and symlinks to private documents kept elsewhere
 *.local.md
 
 tmp/

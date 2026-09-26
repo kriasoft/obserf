@@ -1,0 +1,52 @@
+# Pushing a `v*` tag stages that commit's package on npm; it goes public only
+# once a maintainer runs `npm stage approve` with 2FA. There is no npm token:
+# npm trusts this file by name through OIDC (trusted publishing), and staging
+# rather than publishing means a leaked workflow run still cannot ship a version
+# without a human. Provenance is attached automatically.
+#
+# Bump `version` in package.json, squash-merge to main, then tag that commit:
+#   git switch main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z
+#   npm stage list @obserf/cli && npm stage approve <stage-id>   # npm 12+
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # The same checks as a push, including the tarball-built workspace, so what is
+  # staged is what CI proved.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  stage:
+    needs: ci
+    runs-on: ubuntu-latest
+    # Protect this environment on GitHub (tag rule `v*`) and name it in npm's
+    # trusted publisher settings, so no other job can mint a publish token.
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag names the version being staged
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      # `npm stage publish` and OIDC need a newer npm than the runner ships.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install -g npm@12
+
+      - run: npm stage publish

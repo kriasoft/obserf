@@ -380,3 +380,34 @@ test("the shipped migrations build the tables, columns, keys and indexes the eng
   // migrator's own bookkeeping is not part of the schema it applies.
   expect(tables(db).filter((name) => name !== "obserf_migrations")).toEqual(declared.sort());
 });
+
+/**
+ * Before `first_decided_hidden` existed the inbox could not hide a reason, so
+ * every decision already made was made with it shown. Recording that is what
+ * stops a reopened legacy finding's next review counting as its first.
+ */
+test("decisions made before the hidden flag are recorded as shown", () => {
+  const drizzleDir = join(import.meta.dir, "..", "drizzle");
+  const before = mkdtempSync(join(tmpdir(), "obserf-migrations-"));
+  dirs.push(before);
+  for (const name of readdirSync(drizzleDir).filter((n) => n.endsWith(".sql") && n < "0002")) {
+    copyFileSync(join(drizzleDir, name), join(before, name));
+  }
+
+  const db = database();
+  migrate(db, before);
+  db.exec(
+    `INSERT INTO findings (project, source_id, url, title, venue, discovered_at)
+     VALUES ('p', 's', 'https://e.com/1', 't', 'v', 0), ('p', 's', 'https://e.com/2', 't', 'v', 0)`,
+  );
+  db.exec("INSERT INTO triage (finding_id, status) VALUES (1, 'dismissed'), (2, 'new')");
+  migrate(db);
+
+  expect(
+    db.query("SELECT finding_id, first_decided_hidden FROM triage ORDER BY finding_id").all(),
+  ).toEqual([
+    { finding_id: 1, first_decided_hidden: 0 },
+    // Never decided, as far as anything can tell: its first decision is still to come.
+    { finding_id: 2, first_decided_hidden: null },
+  ]);
+});

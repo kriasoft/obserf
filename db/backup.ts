@@ -12,7 +12,15 @@
  */
 
 import { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import { backupsDir, databasePath, requireCreatableDatabase } from "../workspace";
 
@@ -139,8 +147,7 @@ export function restore(from?: string): { restored: string; replaced: string | n
   const named = from && basename(from) === from ? join(backupsDir, from) : from;
   const restored = named ?? backups().at(-1)?.path;
   if (!restored) throw new Error(`No snapshots of ${basename(databasePath)} in ${backupsDir}.`);
-  if (!existsSync(restored)) throw new Error(`No snapshot at ${restored}.`);
-  readable(restored);
+  checkRestoreSource(restored);
   // The destination may not exist yet — restoring into a fresh workspace is how
   // one is rebuilt from a snapshot — but the same rule decides that as decides
   // whether a command may create one.
@@ -156,22 +163,43 @@ export function restore(from?: string): { restored: string; replaced: string | n
   return { restored, replaced };
 }
 
-/** That the file is a SQLite database and not damaged. Not that it is Obserf's — an old snapshot predates whatever made it interesting to restore. */
-function readable(path: string): void {
+/** That the file holds a whole, undamaged SQLite database. Not that it is Obserf's — an old snapshot predates whatever made it interesting to restore. */
+function checkRestoreSource(path: string): void {
+  // A stat that fails for any other reason than absence is thrown as it is,
+  // rather than reported as no snapshot. `lstat`, so a symlink is refused: SQLite
+  // resolves it and reads the `-wal` beside its target, which the check below
+  // would look for beside the link.
+  const file = lstatSync(path, { throwIfNoEntry: false });
+  if (!file) throw new Error(`No snapshot at ${path}.`);
+  if (file.isSymbolicLink()) throw new Error(`${path} is a symlink; pass its target instead.`);
+  if (!file.isFile()) throw new Error(`${path} is not a regular file.`);
+  // SQLite opens a zero-byte file as an empty database, and it passes the check.
+  if (file.size === 0) throw new Error(`${path} is empty, so there is no database to restore.`);
+  // The check reads through a `-wal` beside the file, but only the file is copied,
+  // so what passed would not be what got restored. A snapshot `backup` wrote
+  // never has one.
+  if (statSync(`${path}-wal`, { throwIfNoEntry: false })?.size) {
+    throw new Error(
+      `${path} has a -wal file beside it that may hold changes restoring the file alone would drop. If it is a live database's log, close whatever has it open and run PRAGMA wal_checkpoint(TRUNCATE) against the database with sqlite3; otherwise restore from a SQLite backup of it rather than a copy of the file.`,
+    );
+  }
+
   let handle: Database | undefined;
+  let damage: string | undefined;
   try {
     handle = new Database(path, { readonly: true });
     const result = handle.query("PRAGMA integrity_check").get() as { integrity_check: string };
-    if (result.integrity_check !== "ok") {
-      throw new Error(`${path} is a damaged database: ${result.integrity_check}`);
-    }
+    // Thrown after cleanup, so the catch does not reword damage as a failed check.
+    if (result.integrity_check !== "ok") damage = result.integrity_check;
   } catch (error) {
+    // Not "not a database": a locked or unreadable file fails here too.
     throw new Error(
-      `${path} is not a database Obserf can restore from: ${
+      `${path} could not be checked as a database to restore from: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
   } finally {
     handle?.close();
   }
+  if (damage !== undefined) throw new Error(`${path} is a damaged database: ${damage}`);
 }

@@ -85,8 +85,7 @@ export interface ProjectProfile {
    *
    * The assessment receives the whole map; the drafter receives the exact
    * venue's rule. The CLI and inbox show it with new and stored drafts for the
-   * operator to recheck. The inbox uses profiles loaded at server startup;
-   * restart it after editing a rule. These reminders are not draft provenance.
+   * operator to recheck. These reminders are not draft provenance.
    */
   venueGuidance?: Record<string, string>;
 

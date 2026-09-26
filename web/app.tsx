@@ -1,13 +1,18 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Assessment, Draft, Finding } from "../db/schema";
-import type { DraftResult } from "../pipeline/draft";
+import type { Assessment, Draft, Finding, Run } from "../db/schema";
 import {
+  DISMISSAL_CATEGORIES,
   DRAFT_KINDS,
+  FIRST_FIX,
   EVERGREEN,
   TRIAGE_STATUSES,
+  compactAge,
   defaultKindFor,
+  draftContextNote,
+  type DismissalCategory,
   type DraftKind,
+  type LatestScanMark,
   type OpportunityType,
   type TriageStatus,
 } from "../vocabulary";
@@ -18,14 +23,25 @@ interface FindingView {
   assessment: Assessment | null;
   status: TriageStatus;
   note: string | null;
+  dismissalCategory: DismissalCategory | null;
 }
-type ListedFinding = FindingView & { drafts: number };
+/** `score` is computed by the server at request time, never stored. */
+type ListedFinding = FindingView & {
+  drafts: number;
+  score: number;
+  latestScan: LatestScanMark | null;
+};
 type FindingDetail = FindingView & {
+  score: number;
+  /** Older verdicts, newest first, of snapshots that were not kept. */
+  earlier: Assessment[];
   drafts: Draft[];
-  /** Profile present at server startup; required for new drafts and venue guidance. */
+  /** Profile present in the workspace now; required for new drafts and venue guidance. */
   profileAvailable: boolean;
   /** Rule from that profile, shown with stored drafts too; not draft provenance. */
   venueRule: string | null;
+  /** Why the profiles on disk do not load; drafting is off until they do. */
+  profileError: string | null;
 };
 
 /**
@@ -34,13 +50,30 @@ type FindingDetail = FindingView & {
  */
 const LIMIT = 200;
 
-/** Triage from the keyboard. */
+/**
+ * Triage from the keyboard. `x` for skipped: `s` is taken, and a skip crosses a
+ * good finding off without calling it a mistake, which is what `d` says.
+ */
 const TRIAGE_KEYS = {
   n: "new",
   s: "shortlisted",
+  x: "skipped",
   d: "dismissed",
   a: "acted",
 } as const satisfies Record<string, TriageStatus>;
+
+/**
+ * What each decision says about Obserf, on the button that makes it. `skipped`
+ * and `dismissed` both clear a finding away, so the difference has to be
+ * stated where the choice is made: one is a positive label, the other a miss.
+ */
+const STATUS_MEANING: Record<TriageStatus, string> = {
+  new: "Not decided yet",
+  shortlisted: "Worth pursuing",
+  skipped: "A good finding you will not pursue — counts as Obserf being right",
+  dismissed: "Obserf should not have shown this — counts against it; say why with a digit",
+  acted: "You posted something",
+};
 
 const KEY_FOR: Partial<Record<TriageStatus, string>> = Object.fromEntries(
   Object.entries(TRIAGE_KEYS).map(([key, status]) => [status, key]),
@@ -61,11 +94,55 @@ const COMPONENTS: ReadonlyArray<[key: "relevance" | "intent" | "welcome" | "reac
 
 const DAY_MS = 86_400_000;
 
+/** localStorage key for the reason-hidden review toggle. */
+const HIDE_JUDGMENT_KEY = "obserf.hideJudgment";
+
+/**
+ * Whether a keystroke is the inbox's to take: no modifier beyond Shift, and not
+ * aimed at a focused control. List rows are buttons as well, and moving through
+ * them from the keyboard is the whole point, so they are the exception.
+ */
+function isShortcut(event: KeyboardEvent): boolean {
+  if (event.metaKey || event.ctrlKey || event.altKey) return false;
+  const target = event.target as HTMLElement | null;
+  return !target?.closest("input, textarea, select, a, button:not(.item)");
+}
+
+interface UndoRecord {
+  /** Identity across the copies `categorize` makes; ids repeat, records do not. */
+  seq: number;
+  id: number;
+  title: string;
+  from: TriageStatus;
+  /** The category `from` carried, so undoing restores the whole dismissal. */
+  fromCategory: DismissalCategory | null;
+  to: TriageStatus;
+  /** Set by a digit after `d`; see `categorize`. */
+  category?: DismissalCategory;
+  /** Set once where an `acted` finding was posted has been recorded. */
+  posted?: string;
+}
+
 interface TriageOptions {
   /** Omitted leaves the stored note alone; see `setTriage`. */
   note?: string;
-  /** False for an undo, which is a correction rather than a new decision. */
+  /** Added to the end of the stored note by the server, which reads it in the same statement. */
+  appendNote?: string;
+  /** Omitted leaves a dismissal's category alone; `null` clears it. */
+  category?: DismissalCategory | null;
+  /**
+   * False for anything that is not a new decision: an undo, or an amendment to
+   * the current one (its category, where it was posted). Only decisions install
+   * an undo record, and only a failed decision blocks category digits.
+   */
   undoable?: boolean;
+  /**
+   * Checked when the write reaches the front of the queue; false drops it. For a
+   * write whose premise a queued one ahead of it can remove.
+   */
+  stillWanted?: () => boolean;
+  /** An amendment: refused unless the stored status is still `next`; see `setTriage`. */
+  amend?: boolean;
 }
 
 function scoreClass(score: number): string {
@@ -109,7 +186,15 @@ const postJson = <T,>(path: string, payload: unknown): Promise<T> =>
   });
 
 function App() {
-  const [projects, setProjects] = useState<Array<{ key: string; name: string }>>([]);
+  /**
+   * Null until loaded, with its own error: scan status names each profile without
+   * a run, so an unread list must not pass for an empty one, nor its error be
+   * cleared by the next list load.
+   */
+  const [projects, setProjects] = useState<Array<{ key: string; name: string }> | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  /** The profiles on disk do not load; the server is using the last ones that did. */
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [project, setProject] = useState("");
   const [status, setStatus] = useState<TriageStatus>("new");
   /**
@@ -118,8 +203,59 @@ function App() {
    * is `status`, and never touches the score.
    */
   const [withZeros, setWithZeros] = useState(false);
+  /**
+   * Reason-hidden review: a `new` finding's score, components, opportunity type
+   * and reason stay hidden until it is triaged or revealed, so the operator
+   * judges the evidence before the model's explanation can persuade them — the
+   * bias docs/product/evaluation.md names. Not blind: the rank order still says
+   * what the model rated highest. Per browser, because it is a review habit, and
+   * storage can be unavailable, so every access is guarded.
+   */
+  const [hideJudgment, setHideJudgment] = useState(() => {
+    try {
+      return localStorage.getItem(HIDE_JUDGMENT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(HIDE_JUDGMENT_KEY, hideJudgment ? "1" : "0");
+    } catch {
+      // Unavailable storage only costs remembering the choice.
+    }
+  }, [hideJudgment]);
+  /** Findings revealed with `r`: shown whatever the toggle says. */
+  const [revealed, setRevealed] = useState<ReadonlySet<number>>(() => new Set());
+  /**
+   * Findings whose judgment was on screen this session: revealed, or listed or
+   * opened while hiding was off. A decision about one was not made hidden, even
+   * if the toggle hides it again by then. Separate from `revealed` so turning the
+   * toggle on still hides what was listed before. Memory only, so a finding seen
+   * in an earlier session counts as hidden: the flag measures what this review
+   * showed, not everything ever read.
+   */
+  const exposed = useRef(new Set<number>());
+  const reveal = useCallback((id: number) => {
+    exposed.current.add(id);
+    setRevealed((current) => (current.has(id) ? current : new Set(current).add(id)));
+  }, []);
   const [items, setItems] = useState<ListedFinding[] | null>(null);
+  /**
+   * The latest scan of each project in view; null until loaded, so no project
+   * reads as unscanned before the answer arrives. The error is separate: "no scan
+   * recorded" and "could not read the record" are different answers.
+   */
+  const [scans, setScans] = useState<Run[] | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // With hiding off, every listed score and the open finding's reason are on
+  // screen, so each is exposed for the rest of the session.
+  useEffect(() => {
+    if (hideJudgment) return;
+    for (const row of items ?? []) exposed.current.add(row.finding.id);
+    if (selectedId !== null) exposed.current.add(selectedId);
+  }, [hideJudgment, items, selectedId]);
   /**
    * The single reload trigger. Everything that changes stored state bumps it, so
    * the list and the open detail refresh from one place — and, because the list
@@ -133,16 +269,35 @@ function App() {
    * memory only: this exists because `d` is one key away from `s` and the row
    * vanishes from the filtered list either way, not to be a history.
    */
-  const [undo, setUndo] = useState<{
-    id: number;
-    title: string;
-    from: TriageStatus;
-    to: TriageStatus;
-  } | null>(null);
+  const [undo, setUndo] = useState<UndoRecord | null>(null);
+  /**
+   * The same record for callbacks queued on `chain`, which run after later
+   * keystrokes and must see what is current then, not what they closed over.
+   */
+  const undoRef = useRef<UndoRecord | null>(null);
+  const undoSeq = useRef(0);
+  /** The `seq` of the record whose undo is in flight, so a digit cannot re-dismiss it. */
+  const undoing = useRef<number | null>(null);
+  /** The `seq` whose posted location is being saved: an append is not idempotent. */
+  const posting = useRef<number | null>(null);
+  /**
+   * A decision failed or changed nothing after the current undo record was made,
+   * so that record no longer names the latest thing the operator did. Category
+   * digits are dropped until the next decision lands rather than filed against
+   * the wrong finding.
+   */
+  const staleRecord = useRef(false);
+  const recordUndo = useCallback((next: UndoRecord | null) => {
+    undoRef.current = next;
+    staleRecord.current = false;
+    setUndo(next);
+  }, []);
 
   // Filter changes fire overlapping requests; without this the slower earlier
   // one can land last and repopulate the list with the previous filter.
   const listTicket = useRef(0);
+  /** The same guard for the scan line, which follows the project filter too. */
+  const scanTicket = useRef(0);
   /** Where to land if the current selection leaves the filtered list. */
   const prefer = useRef<number[]>([]);
   const pane = useRef<HTMLDivElement>(null);
@@ -182,11 +337,32 @@ function App() {
     pane.current?.scrollTo(0, 0);
   }, [selectedId]);
 
+  // Reloaded on returning to the window, the usual way back from editing a
+  // profile, and after every write. The server rereads edited profiles on each
+  // request; fetched once, this list would not.
   useEffect(() => {
-    requestJson<Array<{ key: string; name: string }>>("/api/projects")
-      .then(setProjects)
-      .catch((cause: unknown) => setError(messageOf(cause)));
-  }, []);
+    // Reloads overlap, and StrictMode mounts twice: only the newest may answer.
+    let current = true;
+    requestJson<{ projects: Array<{ key: string; name: string }>; profileError: string | null }>(
+      "/api/projects",
+    )
+      .then((loaded) => {
+        if (!current) return;
+        setProjects(loaded.projects);
+        setProfileError(loaded.profileError);
+        setProjectsError(null);
+      })
+      .catch((cause: unknown) => {
+        if (!current) return;
+        setProjects(null);
+        // Unknown now, which is weaker than the failure last reported.
+        setProfileError(null);
+        setProjectsError(messageOf(cause));
+      });
+    return () => {
+      current = false;
+    };
+  }, [revision]);
 
   /**
    * Emptied the moment the filters change, and refilled only by the request
@@ -204,6 +380,16 @@ function App() {
     setItems(null);
     setSelectedId(null);
   }, [project, status, withZeros]);
+
+  /**
+   * The same for the scan line, on the project alone: status and zeros do not
+   * change which scan applies. Left on screen, it would describe another
+   * project's scan, and a filtered view drops the label that would betray it.
+   */
+  useEffect(() => {
+    setScans(null);
+    setScanError(null);
+  }, [project]);
 
   useEffect(() => {
     const params = new URLSearchParams({
@@ -235,6 +421,25 @@ function App() {
     })();
   }, [project, status, withZeros, revision]);
 
+  // Reloaded with the list, not only on a project change, so a scan that finished
+  // meanwhile leaves no stale warning. A separate request: each is usable when
+  // the other fails.
+  useEffect(() => {
+    const params = project ? `?project=${encodeURIComponent(project)}` : "";
+    const ticket = ++scanTicket.current;
+
+    requestJson<Run[]>(`/api/runs/latest${params}`)
+      .then((runs) => {
+        if (ticket !== scanTicket.current) return;
+        setScans(runs);
+        setScanError(null);
+      })
+      .catch((cause: unknown) => {
+        // Guarded too: a superseded failure must not overwrite a newer answer.
+        if (ticket === scanTicket.current) setScanError(messageOf(cause));
+      });
+  }, [project, status, withZeros, revision]);
+
   // A scan runs in a terminal beside this window, so returning to the tab is the
   // moment the list is most likely to be stale. An unsaved note survives it.
   useEffect(() => {
@@ -256,7 +461,7 @@ function App() {
    */
   const triage = useCallback(
     (id: number, next: TriageStatus, options: TriageOptions = {}): Promise<boolean> => {
-      const { note, undoable = true } = options;
+      const { note, appendNote, category, undoable = true, stillWanted, amend } = options;
       const rows = items ?? [];
       const index = rows.findIndex((row) => row.finding.id === id);
       // Recorded before the write: a status change usually removes the finding
@@ -271,24 +476,52 @@ function App() {
       const title = rows[index]?.finding.title;
 
       const run = chain.current.then(async () => {
+        if (stillWanted && !stillWanted()) return false;
         try {
-          const { previous } = await postJson<{ previous: TriageStatus | null }>(
+          const { previous, previousCategory } = await postJson<{
+            previous: TriageStatus | null;
+            previousCategory: DismissalCategory | null;
+          }>(
             `/api/findings/${id}/triage`,
-            { status: next, note },
+            // What the operator could see while deciding; the server records it
+            // only on the first decision out of `new`.
+            {
+              status: next,
+              note,
+              appendNote,
+              category,
+              amend,
+              hidden: hideJudgment && !exposed.current.has(id),
+            },
           );
           // The server's `previous`, not the rendered row's: a queued write may
           // already have moved it. A note saved on blur posts the status the
           // finding already had, so neither of these applies to it — offering to
           // undo it would be a lie, and advancing the selection would make saving
           // text quietly move the operator somewhere else.
-          if (previous !== null && previous !== next) {
-            prefer.current = neighbours;
-            if (undoable) setUndo({ id, title: title ?? `#${id}`, from: previous, to: next });
+          const moved = previous !== null && previous !== next;
+          if (moved) prefer.current = neighbours;
+          if (undoable && moved) {
+            recordUndo({
+              seq: ++undoSeq.current,
+              id,
+              title: title ?? `#${id}`,
+              from: previous,
+              fromCategory: previousCategory,
+              to: next,
+            });
+          } else if (undoable) {
+            // `d` on a finding already dismissed: the record still names an
+            // earlier one, which a digit meant for this one must not reach.
+            staleRecord.current = true;
           }
           changed();
           return true;
         } catch (cause) {
           setError(messageOf(cause));
+          // The undo record still names the decision before this one, so a
+          // digit meant for this one would be filed against that.
+          if (undoable) staleRecord.current = true;
           return false;
         }
       });
@@ -297,7 +530,7 @@ function App() {
       chain.current = run;
       return run;
     },
-    [items, changed],
+    [items, changed, recordUndo, hideJudgment],
   );
 
   /**
@@ -308,27 +541,121 @@ function App() {
    * can be retried.
    */
   const undoLast = useCallback(async () => {
-    if (!undo) return;
-    if (await triage(undo.id, undo.from, { undoable: false })) {
-      // Only this record: a change queued behind the undo installs its own while
-      // this one is in flight, and that one has not been taken back.
-      setUndo((current) => (current === undo ? null : current));
-    }
-  }, [undo, triage]);
+    // Undo the latest decision made before `u`, which may still be queued: read
+    // now, the record would name the one before it, and that one would be undone
+    // while the decision the operator meant stayed.
+    await chain.current;
+    const record = undoRef.current;
+    if (!record || undoing.current === record.seq) return;
+    undoing.current = record.seq;
+    const ok = await triage(record.id, record.from, {
+      undoable: false,
+      // Only ever set when `from` is a dismissal, which is where a category is valid.
+      category: record.fromCategory ?? undefined,
+    });
+    if (undoing.current === record.seq) undoing.current = null;
+    // Only this record: a change queued behind the undo installs its own while
+    // this one is in flight, and that one has not been taken back.
+    if (ok && undoRef.current?.seq === record.seq) recordUndo(null);
+  }, [triage, recordUndo]);
+
+  /**
+   * The cause of the latest dismissal, from a digit pressed after `d`. Tied to
+   * the undo record rather than to the selection, which `d` has already moved
+   * on: the category belongs to the finding just dismissed, and the operator is
+   * already looking at the next one. Skippable — nothing waits for it.
+   */
+  const categorize = useCallback(
+    (category: DismissalCategory): Promise<boolean> => {
+      // Queued when the digit is pressed, so a decision typed after it cannot land
+      // first and replace the record it is meant for; resolved at its turn, when
+      // every decision typed before it, `d`'s own write included, has landed. Not
+      // through `triage`: a category changes no status, moves no selection and
+      // installs no undo record.
+      const run = chain.current.then(async () => {
+        const record = undoRef.current;
+        // The server refuses a category once the finding is no longer dismissed;
+        // this drops one quietly for what the tab already knows: a dismissal
+        // undone, being undone, or no longer the latest decision.
+        if (record?.to !== "dismissed" || staleRecord.current || undoing.current === record.seq) {
+          return false;
+        }
+        try {
+          await postJson(`/api/findings/${record.id}/triage`, {
+            status: "dismissed",
+            category,
+            amend: true,
+          });
+          const current = undoRef.current;
+          if (current?.seq === record.seq) recordUndo({ ...current, category });
+          changed();
+          return true;
+        } catch (cause) {
+          setError(messageOf(cause));
+          return false;
+        }
+      });
+      chain.current = run;
+      return run;
+    },
+    [recordUndo, changed],
+  );
+
+  /**
+   * Where an `acted` finding was posted, typed into the undo bar right after
+   * `a`. The same reasoning as `categorize`: `a` has moved the selection on, and
+   * the operator has just posted, so this is the moment they know the answer.
+   * Appended to the note rather than replacing it, and optional. Not the outcome
+   * record, which stays blocked until enough findings are acted on to design it.
+   */
+  const recordPosted = useCallback(
+    async (where: string) => {
+      const record = undoRef.current;
+      if (record?.to !== "acted" || !where.trim() || posting.current === record.seq) return;
+      const active = () =>
+        undoRef.current?.seq === record.seq &&
+        undoing.current !== record.seq &&
+        !undoRef.current.posted;
+      if (!active()) return;
+      posting.current = record.seq;
+      // Appended by the server, never re-sent whole: the note may have been
+      // edited since `a`, and a copy taken then would overwrite that edit.
+      const appendNote = `Posted: ${where.trim()}`;
+      const ok = await triage(record.id, "acted", {
+        appendNote,
+        undoable: false,
+        stillWanted: active,
+        amend: true,
+      });
+      if (ok) {
+        const current = undoRef.current;
+        if (current?.seq === record.seq) recordUndo({ ...current, posted: where.trim() });
+      }
+      // Released either way: after a failure Enter retries; after success `posted` guards.
+      if (posting.current === record.seq) posting.current = null;
+    },
+    [triage, recordUndo],
+  );
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      // Never take a keystroke away from a focused control. List rows are buttons
-      // as well, and moving through them from the keyboard is the whole point, so
-      // they are the exception.
-      const target = event.target as HTMLElement | null;
-      if (target?.closest("input, textarea, select, a, button:not(.item)")) return;
+      if (!isShortcut(event)) return;
 
       // Undo must also work after the last row leaves the filtered list.
       if (event.key === "u") {
         event.preventDefault();
         void undoLast();
+        return;
+      }
+      if (event.key === "r" && selectedId !== null) {
+        event.preventDefault();
+        reveal(selectedId);
+        return;
+      }
+      const category = DISMISSAL_CATEGORIES[Number(event.key) - 1];
+      if (category && /^[1-9]$/.test(event.key)) {
+        event.preventDefault();
+        void categorize(category);
         return;
       }
 
@@ -362,7 +689,21 @@ function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [items, selectedId, select, triage, undoLast]);
+  }, [items, selectedId, select, triage, undoLast, categorize, reveal]);
+
+  // Every profile, and every project in the list: a retired one has rows but no
+  // profile, and either may have no run to show. Unknown until the profiles are,
+  // filtered or not, so the profile error's "not shown" holds.
+  const requiredScanProjects =
+    projects &&
+    (project
+      ? [project]
+      : [
+          ...new Set([
+            ...projects.map((p) => p.key),
+            ...(items ?? []).map((row) => row.finding.project),
+          ]),
+        ]);
 
   return (
     <div className="layout">
@@ -370,11 +711,22 @@ function App() {
         <div className="toolbar">
           <select aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
             <option value="">All projects</option>
-            {projects.map((p) => (
+            {projects?.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.name}
               </option>
             ))}
+            {/* The control must always name the filter in force: a project retired
+                while selected still has findings to read, and a failed refresh
+                empties the list without changing what the findings are filtered by.
+                "No profile" only when the list loaded and lacks it, and not from the
+                last good profiles while the current ones fail to load. */}
+            {project && !projects?.some((p) => p.key === project) && (
+              <option value={project}>
+                {project}
+                {projects && !profileError ? " (no profile)" : ""}
+              </option>
+            )}
           </select>
           <select
             aria-label="Triage status"
@@ -393,10 +745,23 @@ function App() {
           >
             <input
               type="checkbox"
+              aria-label="Show zero-scored findings"
               checked={withZeros}
               onChange={(e) => setWithZeros(e.target.checked)}
             />
             zeros
+          </label>
+          <label
+            className="muted"
+            title="Hide the model's score, type and reason on new findings until you triage them or press r"
+          >
+            <input
+              type="checkbox"
+              aria-label="Hide the model's score and reason on new findings"
+              checked={hideJudgment}
+              onChange={(e) => setHideJudgment(e.target.checked)}
+            />
+            hide reasons
           </label>
           <span
             className="muted count"
@@ -408,60 +773,136 @@ function App() {
           </span>
         </div>
 
+        <ScanStatus
+          runs={scans}
+          error={scanError}
+          requiredProjects={requiredScanProjects}
+          showProject={!project}
+        />
+
         {undo && (
           <div className="undo">
             <span className="muted small">
-              {undo.to} · {undo.title}
+              {undo.to}
+              {undo.category && ` (${undo.category})`} · {undo.title}
             </span>
             <button onClick={() => void undoLast()}>
               undo <kbd>u</kbd>
             </button>
+            {undo.to === "acted" &&
+              (undo.posted ? (
+                <p className="muted small">Posted: {undo.posted}</p>
+              ) : (
+                <p className="small">
+                  <input
+                    // Keyed to the record, so the next `a` starts empty.
+                    key={undo.seq}
+                    autoFocus
+                    aria-label="Where was it posted"
+                    placeholder="Where was it posted?"
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void recordPosted(event.currentTarget.value);
+                      if (event.key === "Escape") event.currentTarget.blur();
+                    }}
+                  />{" "}
+                  {/* Beside the field, not in its placeholder: typing hides a
+                      placeholder, and this is how keyboard review resumes. */}
+                  <span className="muted">
+                    <kbd>Enter</kbd> adds it to the note · <kbd>Esc</kbd> skips
+                  </span>
+                </p>
+              ))}
+            {undo.to === "dismissed" && (
+              <p className="muted small">
+                {undo.category ? (
+                  FIRST_FIX[undo.category] && <>First fix: {FIRST_FIX[undo.category]}</>
+                ) : (
+                  <>
+                    Why?{" "}
+                    {DISMISSAL_CATEGORIES.map((c, i) => (
+                      <span key={c}>
+                        <kbd>{i + 1}</kbd> {c}{" "}
+                      </span>
+                    ))}
+                  </>
+                )}
+              </p>
+            )}
           </div>
         )}
 
+        {projectsError && (
+          <p className="error pad">
+            Could not read the profiles, so scan status is not shown — {projectsError}
+          </p>
+        )}
+        {profileError && (
+          <p className="warn pad">
+            The profiles on disk do not load, so the inbox is using the last ones that did and
+            drafting is off until they do: {profileError}
+          </p>
+        )}
         {error && <p className="error pad">{error}</p>}
 
-        {items?.map(({ finding, assessment, note, drafts }) => (
-          <button
-            type="button"
-            id={`finding-${finding.id}`}
-            key={finding.id}
-            className="item"
-            aria-current={finding.id === selectedId}
-            onClick={() => select(finding.id)}
-          >
-            <span className={`score ${scoreClass(assessment?.score ?? 0)}`}>
-              {assessment?.score ?? "–"}
-            </span>
-            <span>
-              <span className="title">{finding.title}</span>
-              <span className="meta">
-                {/* Only when unfiltered: which project a finding belongs to
+        {items?.map(
+          ({ finding, assessment, note, drafts, score, status: rowStatus, latestScan }) => {
+            const hidden = hideJudgment && rowStatus === "new" && !revealed.has(finding.id);
+            return (
+              <button
+                type="button"
+                id={`finding-${finding.id}`}
+                key={finding.id}
+                className="item"
+                aria-current={finding.id === selectedId}
+                onClick={() => select(finding.id)}
+              >
+                {hidden ? (
+                  <span className="score" title="Hidden until triaged or revealed (r)">
+                    ·
+                  </span>
+                ) : (
+                  <span className={`score ${scoreClass(score)}`}>{assessment ? score : "–"}</span>
+                )}
+                <span>
+                  <span className="title">
+                    {finding.title}
+                    {latestScan && (
+                      <span
+                        className="mark"
+                        title={
+                          latestScan === "new"
+                            ? "First found by this project's latest scan"
+                            : "Assessed again by this project's latest scan"
+                        }
+                      >
+                        {latestScan}
+                      </span>
+                    )}
+                  </span>
+                  <span className="meta">
+                    {/* Only when unfiltered: which project a finding belongs to
                     decides the voice a draft is written in. */}
-                {!project && <b>{finding.project} · </b>}
-                {finding.venue} · {assessment?.opportunity ?? "unassessed"}
-                {/* Never "ready to post": a draft is unread text until the
+                    {!project && <b>{finding.project} · </b>}
+                    {finding.venue} ·{" "}
+                    <span title="The thread's age">{compactAge(finding.publishedAt)}</span>
+                    {!hidden && ` · ${assessment?.opportunity ?? "unassessed"}`}
+                    {/* Never "ready to post": a draft is unread text until the
                     operator has read it. */}
-                {drafts > 0 && ` · ${drafts} draft${drafts === 1 ? "" : "s"}`}
-              </span>
-              {/* Keep the operator's optional note distinct from the model's verdict. */}
-              {note && <span className="rownote">{note}</span>}
-            </span>
-          </button>
-        ))}
+                    {drafts > 0 && ` · ${drafts} draft${drafts === 1 ? "" : "s"}`}
+                  </span>
+                  {/* Keep the operator's optional note distinct from the model's verdict. */}
+                  {note && <span className="rownote">{note}</span>}
+                </span>
+              </button>
+            );
+          },
+        )}
 
         {!error && !items && <p className="muted pad">Loading…</p>}
         {items?.length === 0 && (
           <p className="muted pad">
             No {status} findings{project ? " for this project" : ""}
             {withZeros ? "" : " scoring above zero"}.
-            {/* Only `new` arrives from a scan; the rest are decisions. */}
-            {status === "new" && (
-              <>
-                {" "}
-                Run <code>obserf scan</code>.
-              </>
-            )}
           </p>
         )}
       </div>
@@ -477,6 +918,8 @@ function App() {
             key={selectedId}
             id={selectedId}
             revision={revision}
+            judgmentHidden={hideJudgment && !revealed.has(selectedId)}
+            onReveal={() => reveal(selectedId)}
             onTriage={triage}
             onChanged={changed}
             pendingNotes={pendingNotes}
@@ -490,12 +933,17 @@ function App() {
 function Detail({
   id,
   revision,
+  judgmentHidden,
+  onReveal,
   onTriage,
   onChanged,
   pendingNotes,
 }: {
   id: number;
   revision: number;
+  /** The toggle is on and this finding was not revealed; applies only while `new`. */
+  judgmentHidden: boolean;
+  onReveal: () => void;
   onTriage: (id: number, status: TriageStatus, options?: TriageOptions) => Promise<boolean>;
   onChanged: () => void;
   pendingNotes: Map<number, string>;
@@ -507,12 +955,30 @@ function Detail({
    */
   const [note, setNote] = useState<string | null>(() => pendingNotes.get(id) ?? null);
   const [drafting, setDrafting] = useState(false);
-  /**
-   * Context used for the latest draft generated in this mounted detail pane.
-   * Matched by draft id; lost on switching findings or reloading the page.
-   */
-  const [provenance, setProvenance] = useState<DraftResult | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
+  /**
+   * `W` writes the suggested draft and `c` copies the newest one — the last step
+   * of a review, kept on the keyboard with the rest. `W` is Shift+W because a
+   * draft spends model quota and `w` sits beside the triage keys. Read through a
+   * ref, set each render, so the one listener acts on the drafts shown now.
+   */
+  const keys = useRef<{ write?: () => void; copyLatest?: () => void }>({});
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!isShortcut(event)) return;
+      const action =
+        event.key === "W"
+          ? keys.current.write
+          : event.key === "c"
+            ? keys.current.copyLatest
+            : undefined;
+      if (!action) return;
+      event.preventDefault();
+      action();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
   const [error, setError] = useState<string | null>(null);
   /**
    * Discards a detail response that a newer read — or a write this pane already
@@ -541,12 +1007,43 @@ function Detail({
   }, [load, revision]);
 
   if (!detail) return <p className={error ? "error" : "muted"}>{error ?? "Loading…"}</p>;
-  const { finding, assessment, drafts, status, venueRule, profileAvailable } = detail;
+  const {
+    finding,
+    assessment,
+    score,
+    drafts,
+    earlier,
+    status,
+    dismissalCategory,
+    venueRule,
+    profileAvailable,
+    profileError,
+  } = detail;
+  // A profile that failed to reload is still the last good one for reminders,
+  // but not for writing: the draft would come from the text the operator replaced.
+  const canDraft = profileAvailable && !profileError;
+  const hidden = judgmentHidden && status === "new";
   // Null when the model named no opportunity — there is nothing to suggest,
-  // and the buttons below offer every kind instead of promoting one.
-  const suggestedKind = assessment?.opportunity
-    ? defaultKindFor(assessment.opportunity, finding.isThreadComment)
-    : null;
+  // and the buttons below offer every kind instead of promoting one. Null while
+  // hidden too: the suggested kind follows from the opportunity type.
+  const suggestedKind =
+    assessment?.opportunity && !hidden
+      ? defaultKindFor(assessment.opportunity, finding.isThreadComment)
+      : null;
+
+  const latest = drafts[0];
+  keys.current = {
+    // Cleared on use, so a second press before the next render cannot start a
+    // second draft; the render that follows sets it again once writing is done.
+    write:
+      canDraft && suggestedKind && !drafting
+        ? () => {
+            keys.current.write = undefined;
+            void draft(suggestedKind);
+          }
+        : undefined,
+    copyLatest: latest ? () => void copy(latest.id, latest.body) : undefined,
+  };
 
   const stored = detail.note ?? "";
   const noteValue = note ?? stored;
@@ -570,7 +1067,7 @@ function Detail({
     if (note === null) return;
     const submitted = noteValue;
     const written = noteToSave;
-    const ok = await onTriage(id, status, { note: written });
+    const ok = await onTriage(id, status, { note: written, undoable: false });
     if (!ok) return; // The edit stays in the box, and in `pendingNotes`, to retry.
     // The write succeeded, so this is the stored note now. Adopting it here
     // rather than waiting for the reload keeps the box from flashing the old
@@ -593,8 +1090,7 @@ function Detail({
       // Always explicit. The server would otherwise re-derive the kind from the
       // assessment as it stands now, which a scan can have changed since this
       // pane loaded — and the button would have promised the wrong thing.
-      const result = await postJson<DraftResult>(`/api/findings/${id}/draft`, { kind });
-      setProvenance(result);
+      await postJson<Draft>(`/api/findings/${id}/draft`, { kind });
       // Through the parent rather than `load()`: the list row shows a draft
       // count, and it would otherwise stay wrong until something else reloaded —
       // including when the model finishes after the operator has moved on.
@@ -628,18 +1124,44 @@ function Detail({
         {finding.project} · {finding.venue} · {finding.sourceId} ·{" "}
         {finding.publishedAt ? new Date(finding.publishedAt).toDateString() : "date unknown"} ·{" "}
         {status}
+        {dismissalCategory && ` (${dismissalCategory})`}
+        {/* What the model is told beyond the text; bears on `reach` and `welcome`. */}
+        {(finding.isThreadComment || finding.author) && (
+          <>
+            <br />
+            {[
+              finding.isThreadComment ? "one comment inside a thread, not the thread itself" : "",
+              finding.author ? `author: ${finding.author}` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </>
+        )}
       </p>
 
       {finding.repository && <Repository facts={finding.repository} />}
       {finding.metrics && <Engagement metrics={finding.metrics} />}
 
-      {assessment && (
+      {assessment && hidden ? (
+        <>
+          {/* The age is evidence, not judgment, so it stays. */}
+          <div className="components">
+            <Age publishedAt={finding.publishedAt} opportunity={null} />
+          </div>
+          <p className="muted">
+            The model's judgment is hidden until you triage this.{" "}
+            <button onClick={onReveal}>
+              reveal <kbd>r</kbd>
+            </button>
+          </p>
+        </>
+      ) : assessment ? (
         <>
           <div className="components">
             {/* Scales spelled out: a 12 beside a 5 is unreadable otherwise. */}
             <div title="The four components, weighted and then decayed by the thread's age — or zero outright if the finding is disqualified, irrelevant, or unwelcome.">
-              <b className={`score ${scoreClass(assessment.score)}`}>
-                {assessment.score}
+              <b className={`score ${scoreClass(score)}`}>
+                {score}
                 <span className="of">/100</span>
               </b>
               score
@@ -662,15 +1184,21 @@ function Detail({
           {/* When the judgment was made. The publication date above is the
               thread's age, which is a different question. */}
           <p className="muted small">
-            judged {new Date(assessment.createdAt).toLocaleString()} by {assessment.model}
+            judged {new Date(assessment.createdAt).toLocaleString()} by {assessment.model} ·
+            rubric/brief {assessment.promptFingerprint}
           </p>
+          <EarlierVerdicts earlier={earlier} current={assessment.promptFingerprint} />
         </>
+      ) : (
+        // Not muted: a missing verdict is not secondary metadata.
+        <p className="warn">No assessment recorded.</p>
       )}
 
       <div className="actions">
         {TRIAGE_STATUSES.filter((s) => s !== status).map((s) => (
           <button
             key={s}
+            title={STATUS_MEANING[s]}
             onClick={() => void onTriage(id, s, { note: noteDirty ? noteToSave : undefined })}
           >
             {s} {KEY_FOR[s] && <kbd>{KEY_FOR[s]}</kbd>}
@@ -679,19 +1207,53 @@ function Detail({
         {/* Withheld rather than disabled: without a profile the drafter has no
             pitch, voice or venue rule to write from, so the request can only
             come back a 409. Triage and the stored drafts below still work. */}
-        {profileAvailable && suggestedKind && (
+        {canDraft && suggestedKind && (
           <button onClick={() => void draft(suggestedKind)} disabled={drafting}>
-            {drafting ? "Writing…" : `Write a ${suggestedKind}`}
+            {drafting ? "Writing…" : `Write a ${suggestedKind}`} {!drafting && <kbd>W</kbd>}
           </button>
         )}
-        {profileAvailable &&
+        {canDraft &&
           DRAFT_KINDS.filter((k) => k !== suggestedKind).map((k) => (
             <button key={k} onClick={() => void draft(k)} disabled={drafting}>
               {suggestedKind ? `as ${k}` : `Write a ${k}`}
             </button>
           ))}
       </div>
-      {!profileAvailable && (
+      {status === "dismissed" && (
+        <p className="small">
+          <label>
+            Why dismissed{" "}
+            <select
+              value={dismissalCategory ?? ""}
+              onChange={(event) =>
+                void onTriage(id, "dismissed", {
+                  category: (event.target.value || null) as DismissalCategory | null,
+                  amend: true,
+                  // An amendment, like a digit after `d`: its failure is not a
+                  // failed decision, and must not block the digits.
+                  undoable: false,
+                })
+              }
+            >
+              <option value="">not recorded</option>
+              {DISMISSAL_CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </label>{" "}
+          {dismissalCategory && FIRST_FIX[dismissalCategory] && (
+            <span className="muted">First fix: {FIRST_FIX[dismissalCategory]}</span>
+          )}
+        </p>
+      )}
+      {profileError && (
+        <p className="warn small">
+          The profiles on disk do not load, so drafting is off until they do: {profileError}
+        </p>
+      )}
+      {!profileAvailable && !profileError && (
         <p className="warn small">
           No profile for "{finding.project}" any more. Restore it to write a draft; what is already
           here stays readable.
@@ -699,7 +1261,10 @@ function Detail({
       )}
       <p className="muted small">
         <kbd>j</kbd> <kbd>k</kbd> move · <kbd>o</kbd> opens the page · <kbd>u</kbd> undoes the last
-        status change · triage keys apply to the selected finding
+        status change · <kbd>x</kbd> skips a good finding you will not pursue (Obserf was right),{" "}
+        <kbd>d</kbd> dismisses one it should not have shown (counts against it) · after <kbd>d</kbd>
+        , <kbd>1</kbd>–<kbd>{DISMISSAL_CATEGORIES.length}</kbd> say why · <kbd>W</kbd> writes the
+        suggested draft, <kbd>c</kbd> copies the newest · triage keys apply to the selected finding
       </p>
 
       {error && <p className="error">{error}</p>}
@@ -728,7 +1293,7 @@ function Detail({
             ? `Whatever the profile for "${finding.project}" recorded about ${finding.venue} is unreadable with it gone — read the venue's rules and what a submission actually requires before posting.`
             : venueRule
               ? `Your verified note for ${finding.venue}: ${venueRule} — confirm it still holds and that taking part costs nothing before posting.`
-              : `No verified guidance recorded for ${finding.venue}. Obserf cannot check whether a mention is permitted there or what taking part costs — read the venue's rules and what a submission actually requires before posting.`}
+              : `No verified guidance recorded for ${finding.venue}. Obserf cannot check whether a mention is permitted there or what taking part costs — read the venue's rules and what a submission actually requires before posting. A rule you verify yourself goes in the profile's venueGuidance, with its source and the date you checked.`}
         </p>
       )}
 
@@ -740,18 +1305,10 @@ function Detail({
               yourself
             </span>
             <button onClick={() => void copy(d.id, d.body)}>
-              {copied === d.id ? "Copied" : "Copy"}
+              {copied === d.id ? "Copied" : "Copy"} {d.id === latest?.id && <kbd>c</kbd>}
             </button>
           </div>
-          {/* Another client may have generated a newer draft before this reload;
-              retrieval context belongs to the returned id, not list position. */}
-          {provenance?.id === d.id && (
-            <p className={provenance.contextVia ? "muted small" : "warn small"}>
-              {provenance.contextVia
-                ? `written from the live thread (${provenance.contextVia})`
-                : `written from the stored excerpt only${provenance.contextWarning ? ` — ${provenance.contextWarning}` : ""}`}
-            </p>
-          )}
+          <DraftContext draft={d} />
           {d.body}
         </div>
       ))}
@@ -760,16 +1317,110 @@ function Detail({
 }
 
 /**
+ * The latest scan of each project in view, and whether it saw everything it was
+ * asked to: one that skipped sources, died halfway or failed otherwise yields an
+ * inbox indistinguishable from a complete one with less in it.
+ */
+function ScanStatus({
+  runs,
+  error,
+  requiredProjects,
+  showProject,
+}: {
+  runs: Run[] | null;
+  error: string | null;
+  /** Projects whose missing run is said rather than left out; null while unknown. */
+  requiredProjects: string[] | null;
+  /** Name each scan's project, when the list is not filtered to one. */
+  showProject: boolean;
+}) {
+  // Said rather than swallowed: the completeness warnings below are the reason
+  // this exists, so their absence must not be readable as "all clear".
+  if (error) {
+    return <div className="scan warn small">Could not read the scan record — {error}</div>;
+  }
+  if (!runs || !requiredProjects) return null;
+  // Only projects in view: a retired one outside the list is no more reported
+  // for having a run than for lacking one.
+  const shown = runs.filter((run) => requiredProjects.includes(run.project));
+  const unscanned = requiredProjects.filter((key) => !shown.some((run) => run.project === key));
+  if (!shown.length && !unscanned.length) return null;
+
+  return (
+    <div className="scan small">
+      {unscanned.map((key) => (
+        <span className="warn" key={key}>
+          {showProject && `${key} · `}no scan recorded
+        </span>
+      ))}
+      {shown.map((run) => {
+        // Still running, or the process died. Totals are written when a scan
+        // finishes, so an open row's are the insert's zeros, not a count.
+        const open = run.finishedAt === null;
+        // Finalized by a discovery failure: the candidates are real, but an arrow
+        // to "0 assessed" would say they went through a gate that never ran.
+        const counts = open
+          ? ""
+          : run.gated === null
+            ? ` · ${run.candidates} candidates · the gate did not run`
+            : ` · ${run.candidates} candidates → ${run.assessed} assessed`;
+        // Named on every run, as `obserf runs` does: a `--source` scan that
+        // succeeded is otherwise indistinguishable from one of every source.
+        const { skipped } = run;
+        const ran = skipped && run.sources.filter((id) => !(id in skipped));
+        return (
+          <div className="scan-run" key={run.id}>
+            <span className="muted">
+              {showProject && `${run.project} · `}
+              {open ? "scan started" : "last scan"} {ago(new Date(run.startedAt))}
+              {ran && (ran.length ? ` · ran ${ran.join(", ")}` : " · nothing ran")}
+              {counts}
+            </span>
+            {/* `!== null`: `new Error("")` is stored as an empty message. */}
+            {run.error !== null && (
+              <span className="error">scan failed{run.error && `: ${run.error}`}</span>
+            )}
+            {open && (
+              <span className="warn">
+                this scan is unfinished — still running, or stopped — so the list may be short
+              </span>
+            )}
+            {Object.entries(run.skipped ?? {}).map(([source, reason]) => (
+              <span className="warn" key={source}>
+                {source} did not run: {reason}
+              </span>
+            ))}
+            {/* Null is not `{}`: a row written before discovery finished never
+                recorded which sources ran. */}
+            {run.skipped === null && (
+              <span className="muted">
+                selected {run.sources.join(", ")}; which of them ran was not recorded
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Coarse on purpose: the question is "is this list stale", not how stale.
+ * Floored, so a scan is never made to sound older than it is.
+ */
+function ago(date: Date): string {
+  const minutes = Math.floor((Date.now() - date.getTime()) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+}
+
+/**
  * How old the thread is — the term in the score that has no tile of its own.
  * A row reading "12 score, 5 relevance, 4 intent" looks like broken arithmetic
  * until you know the thread is two hundred days old, and the decision it drives
  * is a different one: not a weak match, a dead room.
- *
- * The age, not the multiplier that was applied to it: the stored score was
- * decayed whenever it was last computed, and `obserf rescore` recomputes scores
- * against a fresh clock without touching the assessment's timestamp. Nothing the
- * browser can calculate reliably reproduces the number actually baked in, and a
- * multiplier that is quietly wrong is worse than none.
  */
 function Age({
   publishedAt,
@@ -792,7 +1443,7 @@ function Age({
       title={
         evergreen
           ? "The thread's age now. Listings do not decay: an old curated list still merging pull requests is a live opportunity."
-          : "The thread's age now. Scores decay with age — halved every 30 days, floored at 15% — but the stored score used the age this thread had when it was last scored, which may be younger than this."
+          : "The thread's age now. Scores decay with age — halved every 30 days, floored at 15%."
       }
     >
       <b>{days}d</b>
@@ -881,3 +1532,47 @@ root.render(
     <App />
   </StrictMode>,
 );
+
+/** What a draft was written against, shown with stored drafts too. */
+function DraftContext({ draft }: { draft: Draft }) {
+  const { text, complete } = draftContextNote(draft.contextSource, draft.contextWarning);
+  return <p className={complete ? "muted small" : "warn small"}>{text}</p>;
+}
+
+/**
+ * The verdicts before the current one, collapsed: most findings have none, and
+ * where they do, the first question is whether the rubric or the project brief
+ * changed between them — so the summary says that without opening the list. It
+ * says no more: the fingerprint leaves out how the candidate was formatted, so
+ * matching fingerprints do not mean the model saw the same prompt. No score, as in
+ * `obserf show`: one computed now would apply today's weights and clock to a
+ * snapshot that was not kept, and the evidence each saw is gone, so these show
+ * that a verdict moved, not why.
+ */
+function EarlierVerdicts({ earlier, current }: { earlier: Assessment[]; current: string }) {
+  if (!earlier.length) return null;
+  const briefChanged = earlier.some((a) => a.promptFingerprint !== current);
+  return (
+    <details className="earlier small">
+      <summary className="muted">
+        {earlier.length} earlier assessment{earlier.length === 1 ? "" : "s"}
+        {briefChanged ? ", rubric or brief changed since" : ", same rubric and brief"}
+      </summary>
+      {earlier.map((a) => (
+        <div key={a.id}>
+          <p>
+            {a.disqualified && <span className="flag">disqualified</span>}
+            {COMPONENTS.map(([key]) => `${key} ${a[key]}`).join(" · ")}
+          </p>
+          <p className="muted">
+            <strong>{a.opportunity ?? "no shape"}</strong> — {a.reason}
+          </p>
+          <p className="muted">
+            judged {new Date(a.createdAt).toLocaleString()} by {a.model} · rubric/brief{" "}
+            {a.promptFingerprint}
+          </p>
+        </div>
+      ))}
+    </details>
+  );
+}

@@ -16,6 +16,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # release.yml runs these checks against the tagged commit before it publishes.
+  workflow_call:
 
 permissions:
   contents: read
@@ -62,9 +64,10 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      # `files` is an explicit whitelist that fails closed: a new source file
-      # left out of it breaks here rather than reaching a user, which is the
-      # trade that keeps an operator's database out of a published tarball.
+      # `files` is an explicit whitelist: it keeps an operator's database out of
+      # the tarball, but a new source file is easy to forget. Nothing here reads
+      # the list; the steps below prove each file present by running a command
+      # that needs it.
       - name: Pack
         run: |
           npm pack --pack-destination /tmp >/dev/null
@@ -89,5 +92,73 @@ jobs:
           bun run obserf projects              # resolves `obserf` from a profile
           bun run obserf list                  # creates and migrates the database
           test -f .obserf/obserf.db
+          bun run obserf runs                  # reads the run table the migration adds
           bun run obserf backup                # snapshot and restore round-trip
           bun run obserf restore
+
+      # A scan of the untouched scaffold is refused before a request goes out,
+      # which makes this the offline way to exercise profile loading and the
+      # guard from the installed package.
+      - name: A scan refuses the untouched example
+        run: |
+          set -eux
+          cd /tmp/workspace
+          # `if`, not `! cmd | tee`: a pipeline reports the last command's status,
+          # so the negation would pass on tee's success no matter what the scan did.
+          if ./node_modules/.bin/obserf scan --dry-run >/tmp/scan.log 2>&1; then
+            echo "::error::a scan of the untouched scaffold was not refused"
+            cat /tmp/scan.log
+            exit 1
+          fi
+          if ! grep -q "scaffold placeholder queries remain" /tmp/scan.log; then
+            echo "::error::the scan failed, but not on the scaffold guard"
+            cat /tmp/scan.log
+            exit 1
+          fi
+
+      # `serve` is the only command that bundles, at request time. A file missing
+      # from `files` leaves every other command passing and the server binding
+      # while the page answers 500, so the page has to actually be fetched.
+      - name: The inbox serves its page from the installed package
+        run: |
+          set -eux
+          cd /tmp/workspace
+          # The binary, not `bun run obserf`: that wrapper is a second process,
+          # and killing it can leave the server holding the port.
+          ./node_modules/.bin/obserf serve --port 4137 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          curl -fsS --retry 15 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:4137/ >/tmp/page.html
+          grep -q "<title>Obserf</title>" /tmp/page.html
+          curl -fsS http://127.0.0.1:4137/api/projects >/tmp/projects.json
+          grep -q '"key":"example"' /tmp/projects.json
+
+          # Each status is captured before it is compared, so `set -e` sees
+          # curl's own failure; inside `test "$(curl …)"` it would not.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            'http://127.0.0.1:4137/api/findings?min=abc')
+          test "$code" = 400
+
+          # The write that used to reach a foreign key and answer with Bun's
+          # development error page. Its body must say why, and carry no source
+          # or paths.
+          code=$(curl -sS -o /tmp/refusal.json -w '%{http_code}' \
+            -X POST -H 'Content-Type: application/json' -d '{"status":"acted"}' \
+            http://127.0.0.1:4137/api/findings/abc/triage)
+          test "$code" = 400
+          grep -q '"error"' /tmp/refusal.json
+          if grep -qE '__bunfallback|\.ts"|/tmp/workspace' /tmp/refusal.json; then
+            echo "::error::a refusal carried the server's source or its paths"
+            exit 1
+          fi
+
+          # DNS rebinding: a rebound page's `Host` names the attacker's domain.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: attacker.example' \
+            http://127.0.0.1:4137/api/findings)
+          test "$code" = 403
+          # The page too, as defense in depth. That check is Bun's own and exists
+          # only while `development` is on; any refusal will do, not just 403.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: attacker.example' \
+            http://127.0.0.1:4137/)
+          [[ "$code" == 4?? ]]

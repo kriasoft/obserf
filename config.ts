@@ -56,7 +56,7 @@ export const config = {
   },
 
   /** Reddit and GitHub both reject or throttle requests without a real User-Agent. */
-  userAgent: process.env.OBSERF_USER_AGENT ?? "obserf/0.1 (+https://obserf.com)",
+  userAgent: process.env.OBSERF_USER_AGENT ?? "obserf/0.2 (+https://obserf.com)",
 
   /** Gate thresholds — see docs/adr/004-deterministic-gates-before-the-model.md */
   gate: {

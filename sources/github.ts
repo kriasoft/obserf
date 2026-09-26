@@ -63,7 +63,7 @@ let cached: Credentials | undefined;
  * needs no obserf configuration at all, and no second copy of a credential that
  * would then have to be rotated twice.
  *
- * Failure to obtain a token from `gh` falls back to unauthenticated search.
+ * Failure to obtain a token from `gh` falls back to unauthenticated requests.
  * Once a token is selected, request failures propagate; obserf does not retry
  * a rejected token anonymously.
  */
@@ -91,13 +91,27 @@ async function credentials(): Promise<Credentials> {
     cached = { origin: "unauthenticated" };
   }
 
-  if (!cached.token) {
-    console.warn(
-      "  github: no token — running at 10 requests/minute. " +
-        "Run `gh auth login`, set OBSERF_GITHUB_USER, or set GITHUB_TOKEN.",
-    );
-  }
   return cached;
+}
+
+/**
+ * REST headers with whatever credential `credentials()` resolved, for search
+ * here and for draft-time reads in `pipeline/draft-context.ts`, so the
+ * credential order is stated once.
+ *
+ * No pacing or anonymous warning for those reads: they draw on the core limit,
+ * a draft makes at most two requests, and an exhausted anonymous quota (60 an
+ * hour) is reported by the request that fails.
+ */
+export async function githubHeaders(accept = "application/vnd.github+json") {
+  const auth = await credentials();
+  const headers: Record<string, string> = {
+    Accept: accept,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": config.userAgent,
+  };
+  if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
+  return headers;
 }
 
 /** Keep each endpoint tied to its response type. */
@@ -115,19 +129,27 @@ interface Search {
  */
 let lastRequestAt = 0;
 
+/** The anonymous-rate warning below is advice, not news; say it once. */
+let warnedAnonymous = false;
+
 /** Search that paces itself to whichever rate limit actually applies. */
 async function pacedSearch(): Promise<Search> {
   const auth = await credentials();
   // Keying this off the env var alone would throttle a gh-authenticated scan at
   // the anonymous rate.
   const delayMs = auth.token ? 2100 : 6100;
+  // Here rather than in `credentials()`: the rate quoted is search's, and a
+  // draft-time read is no reason to warn about it. Once per process, since every
+  // source and enrichment pass comes through here.
+  if (!auth.token && !warnedAnonymous) {
+    warnedAnonymous = true;
+    console.warn(
+      "  github: no token — running at 10 requests/minute. " +
+        "Run `gh auth login`, set OBSERF_GITHUB_USER, or set GITHUB_TOKEN.",
+    );
+  }
 
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": config.userAgent,
-  };
-  if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
+  const headers = await githubHeaders();
 
   const request = async (
     path: "issues" | "repositories",
