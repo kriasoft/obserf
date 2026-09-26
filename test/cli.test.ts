@@ -49,6 +49,81 @@ async function run(root: string, ...args: string[]) {
   return { code: await child.exited, output: stdout + stderr, stdout };
 }
 
+describe("--project resolution", () => {
+  function workspaceWithStoredProject(): string {
+    const root = workspace();
+    mkdirSync(join(root, ".obserf"), { recursive: true });
+    const handle = new Database(join(root, ".obserf", "obserf.db"), { create: true });
+    migrate(handle);
+    handle
+      .query("INSERT INTO runs (project, started_at, sources) VALUES (?,?,?)")
+      .run("retired", 0, JSON.stringify(["hn"]));
+    handle.close();
+    return root;
+  }
+
+  test("reports a profile that will not load, rather than calling the key unknown", async () => {
+    const root = workspaceWithStoredProject();
+    writeFileSync(join(root, "projects", "broken.ts"), `throw new Error("profile is broken");`);
+    const { code, output } = await run(root, "rescore", "--project", "p");
+    expect(code).not.toBe(0);
+    expect(output).toContain("profile is broken");
+    expect(output).not.toContain("Unknown project");
+  });
+
+  test("still reads a retired project without loading any profile", async () => {
+    const root = workspaceWithStoredProject();
+    writeFileSync(join(root, "projects", "broken.ts"), `throw new Error("profile is broken");`);
+    const { code } = await run(root, "rescore", "--project", "retired");
+    expect(code).toBe(0);
+  });
+
+  test("an unknown key names the active and the retired projects", async () => {
+    const { code, output } = await run(
+      workspaceWithStoredProject(),
+      "list",
+      "--project",
+      "missing",
+    );
+    expect(code).not.toBe(0);
+    expect(output).toContain(`Unknown project "missing". Available: p, retired`);
+  });
+
+  /** Retiring the last profile must not turn a typo into "no profiles". */
+  test("is still named as unknown once every profile is retired", async () => {
+    const root = workspaceWithStoredProject();
+    rmSync(join(root, "projects", "p.ts"));
+    const { code, output } = await run(root, "rescore", "--project", "missing");
+    expect(code).not.toBe(0);
+    expect(output).toContain(`Unknown project "missing". Available: retired`);
+  });
+
+  test("a typo with no projects at all creates no database", async () => {
+    const root = workspace();
+    rmSync(join(root, "projects", "p.ts"));
+    const { code, output } = await run(root, "rescore", "--project", "missing");
+    expect(code).not.toBe(0);
+    expect(output).toContain(`Unknown project "missing". No projects are available.`);
+    expect(existsSync(join(root, ".obserf"))).toBe(false);
+  });
+
+  /** A database that fails on open, so reaching the lookup first would fail differently. */
+  test("numeric filters are parsed before the lookup", async () => {
+    const root = workspace();
+    mkdirSync(join(root, ".obserf"), { recursive: true });
+    writeFileSync(join(root, ".obserf", "obserf.db"), "not a sqlite database");
+    const { code, output } = await run(root, "list", "--project", "p", "--min", "nope");
+    expect(code).not.toBe(0);
+    expect(output).toContain("--min must be an integer");
+  });
+
+  test("an empty key is refused rather than meaning every project", async () => {
+    const { code, output } = await run(workspace(), "rescore", "--project", "");
+    expect(code).not.toBe(0);
+    expect(output).toContain("--project was given no value");
+  });
+});
+
 /**
  * `obserf draft` has always printed what the operator verified about the venue
  * and what obserf cannot establish — permission and cost — because that is the

@@ -3,8 +3,48 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { knownFindingsForDryRun } from "../db";
+import { db, knownFindingsForDryRun, schema, storedProjects } from "../db";
 import { migrate } from "../db/migrate";
+
+/**
+ * `storedProjects` is what lets `obserf list` and `rescore` reject a
+ * mistyped `--project` without also locking the operator out of the history of a
+ * profile they have since retired. Pinned here: either table alone counts, a
+ * project in both is named once, and the list is sorted.
+ *
+ * Other suites write to the same test database (`test/setup.ts`), so the
+ * membership and dedupe assertions use keys unique to this test.
+ */
+test("names every project the database holds rows for, once", () => {
+  const insertFinding = (project: string) =>
+    db
+      .insert(schema.findings)
+      .values({
+        project,
+        sourceId: "github",
+        url: `https://example.com/${project}`,
+        title: "a",
+        venue: "example.com",
+        discoveredAt: new Date(),
+      })
+      .run();
+  const insertRun = (project: string) =>
+    db
+      .insert(schema.runs)
+      .values({ project, startedAt: new Date(), sources: ["github"] })
+      .run();
+
+  insertRun("stored-projects-run-only");
+  insertFinding("stored-projects-finding-only");
+  insertRun("stored-projects-both");
+  insertFinding("stored-projects-both");
+
+  const stored = storedProjects();
+  expect(stored).toContain("stored-projects-run-only");
+  expect(stored).toContain("stored-projects-finding-only");
+  expect(stored.filter((key) => key === "stored-projects-both")).toHaveLength(1);
+  expect(stored).toEqual([...stored].sort());
+});
 
 /**
  * The history behind `scan --dry-run`'s gate counts. The old read-only connection

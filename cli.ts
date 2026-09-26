@@ -6,6 +6,7 @@
  * this.
  */
 
+import { statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 // The version that scaffolded a workspace is the one known to work with it.
 import { version } from "./package.json";
@@ -27,6 +28,7 @@ import {
   latestFindings,
   prepareDatabase,
   setTriage,
+  storedProjects,
 } from "./db";
 import { backup, backups, restore } from "./db/backup";
 import type { Finding } from "./db/schema";
@@ -192,6 +194,34 @@ function intArg(name: string, raw: string | undefined, fallback: number, min = 1
   return value;
 }
 
+/**
+ * The project a `--project` flag names, checked before it reaches a SQL filter
+ * that would match nothing — which reads as a quiet week.
+ *
+ * Stored keys answer first, so a retired profile's history stays readable
+ * without importing any profile. Then the profiles, allowing none left; one that
+ * will not load is reported as itself, not as an unknown key.
+ */
+async function resolveProjectFilter(key: string | undefined): Promise<string | undefined> {
+  if (key === undefined) return undefined;
+  // Downstream SQL treats a falsy project as unfiltered.
+  if (!key) throw new Error("--project was given no value.");
+
+  // No database means no stored keys, and a typo should not create one. Not
+  // `existsSync`, which reports an unreadable path as absent.
+  const stored = statSync(databasePath, { throwIfNoEntry: false }) ? storedProjects() : [];
+  if (stored.includes(key)) return key;
+
+  const profiles = (await loadProjectsIfAny()).map((project) => project.key);
+  if (profiles.includes(key)) return key;
+
+  const known = [...new Set([...profiles, ...stored])].sort();
+  throw new Error(
+    `Unknown project "${key}". ` +
+      (known.length ? `Available: ${known.join(", ")}` : "No projects are available."),
+  );
+}
+
 /** How wide prose may run, or 0 when nothing is reading this on a screen. */
 function terminalWidth(): number {
   if (!process.stdout.isTTY) return 0;
@@ -341,7 +371,7 @@ async function main(): Promise<void> {
     case "triage":
       return runTriage(positionals[0], positionals[1], values.note);
     case "rescore": {
-      const count = rescore(values.project);
+      const count = rescore(await resolveProjectFilter(values.project));
       console.log(`Rescored ${count} assessment${count === 1 ? "" : "s"}.`);
       return;
     }
@@ -537,15 +567,19 @@ function readyToScan(targets: ProjectProfile[]): ProjectProfile[] {
   return ready;
 }
 
-function runList(values: { project?: string; status?: string[]; min?: string; limit?: string }) {
+async function runList(values: {
+  project?: string;
+  status?: string[];
+  min?: string;
+  limit?: string;
+}) {
   const status = (listArg("status", values.status) ?? ["new"]).map(triageStatus);
 
-  const rows = latestFindings({
-    project: values.project,
-    status,
-    minScore: intArg("min", values.min, 1, 0),
-    limit: intArg("limit", values.limit, 20),
-  });
+  // Before the project lookup, which may open the database.
+  const minScore = intArg("min", values.min, 1, 0);
+  const limit = intArg("limit", values.limit, 20);
+  const project = await resolveProjectFilter(values.project);
+  const rows = latestFindings({ project, status, minScore, limit });
 
   if (!rows.length) {
     console.log(dim("Nothing to show. Run `obserf scan` first."));
