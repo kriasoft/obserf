@@ -7,8 +7,63 @@
  * bundle. Nothing here may import anything.
  */
 
-export const TRIAGE_STATUSES = ["new", "shortlisted", "dismissed", "acted"] as const;
+/**
+ * The operator's decision. `skipped` and `dismissed` both mean "not acting on
+ * it" but say opposite things about Obserf: `skipped` is a good recommendation
+ * the operator chose to pass on, `dismissed` is one Obserf should not have made.
+ * Kept apart so a busy week does not read as bad ranking, and so every
+ * dismissal is evidence about the assessment.
+ */
+export const TRIAGE_STATUSES = ["new", "shortlisted", "skipped", "dismissed", "acted"] as const;
 export type TriageStatus = (typeof TRIAGE_STATUSES)[number];
+
+/** Decisions that end a finding's review: a scan never reassesses one while it holds. */
+export const SETTLED: ReadonlySet<TriageStatus> = new Set<TriageStatus>([
+  "skipped",
+  "dismissed",
+  "acted",
+]);
+
+/** Decisions that say the recommendation was right, whatever the operator then did. */
+export const WORTH_SURFACING: ReadonlySet<TriageStatus> = new Set<TriageStatus>([
+  "shortlisted",
+  "skipped",
+  "acted",
+]);
+
+/**
+ * Why Obserf was wrong to recommend a finding, so the evaluation record can
+ * count causes instead of parsing notes. The first seven are the diagnosis rows
+ * of docs/product/evaluation.md, in its order; `other` is a failure outside the
+ * table and points at no fix. A good finding passed over is `skipped`, not a
+ * dismissal with a category.
+ *
+ * Never an input to scoring: a category says which layer to fix, and a weight
+ * learned from it would hide the failure instead.
+ */
+export const DISMISSAL_CATEGORIES = [
+  "cannot-solve",
+  "vocabulary-only",
+  "no-participation",
+  "venue-forbids",
+  "paid",
+  "concluded",
+  "no-audience",
+  "other",
+] as const;
+export type DismissalCategory = (typeof DISMISSAL_CATEGORIES)[number];
+
+/** The first fix evaluation.md names for each category; null where there is none. */
+export const FIRST_FIX: Readonly<Record<DismissalCategory, string | null>> = {
+  "cannot-solve": "profile `pitch` and `notFor`, then the prompt",
+  "vocabulary-only": "`notFor`, then queries",
+  "no-participation": "the evidence, then the prompt",
+  "venue-forbids": "`venueGuidance`, then the prompt",
+  paid: "the evidence, then the prompt",
+  concluded: "the evidence, then the prompt",
+  "no-audience": "source selection",
+  other: null,
+};
 
 /**
  * Where a draft's view of the thread came from. `excerpt` is what the scan
@@ -46,6 +101,28 @@ export function draftContextNote(
     text: warning ? `${base} — ${warning}` : base,
     complete: source !== "excerpt" && !warning,
   };
+}
+
+/** What the project's latest scan did to a finding: first stored it, or wrote its current verdict. */
+export type LatestScanMark = "new" | "reassessed";
+
+/**
+ * A thread's age in one short token for a list row — `5h`, `3d`, `5w`, `8mo`,
+ * `2y` — and `?` when the source reported no date. Rounded down, so a row never
+ * reads younger than its thread. Says nothing about decay: a listing's age is
+ * shown like any other, since how old a curated list is still matters, and a
+ * row must not reveal the opportunity type while the model's judgment is hidden.
+ */
+export function compactAge(publishedAt: Date | string | null, now: Date = new Date()): string {
+  if (!publishedAt) return "?";
+  const hours = Math.max(0, (now.getTime() - new Date(publishedAt).getTime()) / 3_600_000);
+  const days = hours / 24;
+  if (days < 1) return `${Math.floor(hours)}h`;
+  if (days < 14) return `${Math.floor(days)}d`;
+  if (days < 70) return `${Math.floor(days / 7)}w`;
+  // Two years by the divisor below, so `23mo` never steps back to `1y`.
+  if (days < 2 * 365.25) return `${Math.floor(days / 30.44)}mo`;
+  return `${Math.floor(days / 365.25)}y`;
 }
 
 export const OPPORTUNITY_TYPES = [

@@ -9,10 +9,10 @@ Obserf's job is to make that reading cheap enough to actually happen.
 ## The loop
 
 1. **Discover.** Each source adapter runs the project's queries and returns candidates — a URL, a title, an excerpt, a venue, a date.
-2. **Gate.** Deterministic filters drop what is obviously not worth a model call, in the order they are applied: a duplicate of this scan, one dismissed or acted on, a blocked domain, too old, too little text, one unchanged and recently assessed, one unchanged that the model disqualified less than a month ago. See [ADR-004](../adr/004-deterministic-gates-before-the-model.md).
+2. **Gate.** Deterministic filters drop what is obviously not worth a model call, in the order they are applied: a duplicate of this scan, one skipped, dismissed or acted on, a blocked domain, too old, too little text, one unchanged and recently assessed, one unchanged that the model disqualified less than a month ago. See [ADR-004](../adr/004-deterministic-gates-before-the-model.md).
 3. **Enrich.** Adapters that can add facts too expensive to fetch for every search result do so, for survivors only — GitHub measures a curated list's recent pull-request outcomes and its backlog. See [ADR-009](../adr/009-expensive-evidence-after-the-gate.md).
 4. **Assess.** A model scores each survivor on four components and says whether a mention would be welcome. Code turns those components into a rank. See [Scoring](./scoring.md).
-5. **Triage.** The operator reads the ranked list — in the terminal or the local review inbox — and shortlists or dismisses.
+5. **Triage.** The operator reads the ranked list — in the terminal or the local review inbox — and shortlists, skips or dismisses.
 6. **Draft.** For a shortlisted opportunity, obserf writes the comment, reply, or submission. The operator edits and posts it themselves. Obserf never posts. See [ADR-005](../adr/005-obserf-drafts-humans-post.md).
 
 Steps 1–4 are automatic and can run on a schedule. Steps 5–6 are the operator's, and are the point: the tool exists to make a human's judgment cheaper to apply, not to replace it.

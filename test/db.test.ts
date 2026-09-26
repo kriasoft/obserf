@@ -3,11 +3,22 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { db, knownFindingsForDryRun, latestRunPerProject, schema, storedProjects } from "../db";
+import {
+  db,
+  findingById,
+  knownFindingsForDryRun,
+  latestRunPerProject,
+  latestScanMark,
+  schema,
+  setTriage,
+  DecisionChanged,
+  storedProjects,
+} from "../db";
+import { eq } from "drizzle-orm";
 import { migrate } from "../db/migrate";
 
 /**
- * `storedProjects` is what lets `obserf list`, `runs` and `rescore` reject a
+ * `storedProjects` is what lets `obserf list` and `runs` reject a
  * mistyped `--project` without also locking the operator out of the history of a
  * profile they have since retired. Pinned here: either table alone counts, a
  * project in both is named once, and the list is sorted.
@@ -131,8 +142,8 @@ describe("knownFindingsForDryRun", () => {
         .run(id);
       const assess = handle.query(
         `INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent,
-           welcome, reach, reason, score, disqualified, created_at)
-         VALUES (?, 'm', 'f', 1, 1, 1, 1, 'r', 0, ?, ?)`,
+           welcome, reach, reason, disqualified, created_at)
+         VALUES (?, 'm', 'f', 1, 1, 1, 1, 'r', ?, ?)`,
       );
       assess.run(id, 0, 1);
       assess.run(id, 1, 2);
@@ -234,5 +245,128 @@ describe("knownFindingsForDryRun", () => {
     expect(code).not.toBe(0);
     expect(stderr).toContain(`No database at ${typo} (OBSERF_DB)`);
     expect(existsSync(typo)).toBe(false);
+  });
+});
+
+/**
+ * A category describes a dismissal, so it lives exactly as long as one: kept
+ * while the note is edited, gone once the finding is reopened, and never stored
+ * beside another status.
+ */
+describe("setTriage and the dismissal category", () => {
+  const id = db
+    .insert(schema.findings)
+    .values({
+      project: "triage-category",
+      sourceId: "hn",
+      url: "https://example.com/triage-category",
+      title: "t",
+      venue: "example.com",
+      discoveredAt: new Date(),
+    })
+    .returning()
+    .get().id;
+  const category = () => findingById(id)?.dismissalCategory;
+
+  test("survives a note edit, and is cleared by reopening", () => {
+    setTriage(id, { status: "dismissed", category: "paid" });
+    setTriage(id, { status: "dismissed", note: "why" });
+    expect(category()).toBe("paid");
+    setTriage(id, { status: "dismissed", category: null });
+    expect(category()).toBeNull();
+    setTriage(id, { status: "dismissed", category: "concluded" });
+    setTriage(id, { status: "new" });
+    expect(category()).toBeNull();
+    // Dismissed again without one: the old cause does not come back.
+    setTriage(id, { status: "dismissed" });
+    expect(category()).toBeNull();
+  });
+
+  /** A category typed in the inbox must not undo a reopening made from the terminal. */
+  test("an amendment is refused once the decision changed", () => {
+    setTriage(id, { status: "dismissed" });
+    setTriage(id, { status: "new" });
+    expect(() => setTriage(id, { status: "dismissed", category: "paid", amend: true })).toThrow(
+      DecisionChanged,
+    );
+    expect(findingById(id)?.status).toBe("new");
+
+    setTriage(id, { status: "dismissed" });
+    setTriage(id, { status: "dismissed", category: "paid", amend: true });
+    expect(category()).toBe("paid");
+  });
+
+  /** The reopened finding is judged by someone who saw the first verdict. */
+  test("records whether the first decision was hidden, once", () => {
+    const hiddenOf = () => findingById(id)?.firstDecidedHidden;
+    setTriage(id, { status: "new" });
+    // This finding may already carry a first decision from the test above.
+    db.update(schema.triage)
+      .set({ firstDecidedHidden: null })
+      .where(eq(schema.triage.findingId, id))
+      .run();
+    setTriage(id, { status: "new", note: "still new", hidden: true });
+    expect(hiddenOf()).toBeNull();
+    setTriage(id, { status: "shortlisted", hidden: true });
+    expect(hiddenOf()).toBe(true);
+    setTriage(id, { status: "new" });
+    setTriage(id, { status: "dismissed" });
+    expect(hiddenOf()).toBe(true);
+  });
+
+  /** Where it was posted, added after `a` without overwriting a note edited since. */
+  test("appends a line to whatever note is stored when it runs", () => {
+    const note = () => findingById(id)?.note;
+    setTriage(id, { status: "acted", note: null });
+    setTriage(id, { status: "acted", appendNote: "Posted: first" });
+    expect(note()).toBe("Posted: first");
+    setTriage(id, { status: "acted", note: "edited since" });
+    setTriage(id, { status: "acted", appendNote: "Posted: second" });
+    expect(note()).toBe("edited since\nPosted: second");
+    expect(() => setTriage(id, { status: "acted", note: "a", appendNote: "b" })).toThrow(
+      "not both",
+    );
+  });
+
+  /** Undo restores the whole decision it took back, category included. */
+  test("reports the status and category it replaced", () => {
+    setTriage(id, { status: "dismissed", category: "paid" });
+    expect(setTriage(id, { status: "shortlisted" })).toEqual({
+      status: "dismissed",
+      category: "paid",
+    });
+  });
+
+  /** Only a dismissal says Obserf was wrong, so only it keeps a cause. */
+  test("is cleared when a dismissal is changed to skipped", () => {
+    setTriage(id, { status: "dismissed", category: "vocabulary-only" });
+    setTriage(id, { status: "skipped" });
+    expect(category()).toBeNull();
+  });
+
+  test("is refused beside any other status", () => {
+    expect(() => setTriage(id, { status: "shortlisted", category: "paid" })).toThrow(
+      "dismissal category",
+    );
+  });
+});
+
+/** What a review starts with: what the latest scan added, and what it looked at again. */
+describe("latestScanMark", () => {
+  const run = { id: 7 };
+
+  test("new when that scan first stored it, whoever wrote its verdict", () => {
+    expect(latestScanMark({ firstRunId: 7 }, { runId: 7 }, run)).toBe("new");
+  });
+
+  test("reassessed when that scan wrote the verdict of an earlier finding", () => {
+    expect(latestScanMark({ firstRunId: 3 }, { runId: 7 }, run)).toBe("reassessed");
+    expect(latestScanMark({ firstRunId: 3 }, { runId: 5 }, run)).toBeNull();
+  });
+
+  /** Recorded before verdicts named their run: unknown, so unmarked. */
+  test("nothing for a legacy verdict, or without a scan to compare against", () => {
+    expect(latestScanMark({ firstRunId: 3 }, { runId: null }, run)).toBeNull();
+    expect(latestScanMark({ firstRunId: null }, { runId: 7 }, undefined)).toBeNull();
   });
 });

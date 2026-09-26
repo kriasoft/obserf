@@ -8,11 +8,11 @@
 
 import { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
-import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { union } from "drizzle-orm/sqlite-core";
 import * as schema from "./schema";
-import type { TriageStatus } from "../vocabulary";
+import type { DismissalCategory, LatestScanMark, TriageStatus } from "../vocabulary";
 
 /**
  * What storage knows for the gate's history checks, plus stable URL shape that
@@ -94,6 +94,8 @@ export interface FindingView {
   assessment: schema.Assessment | null;
   status: TriageStatus;
   note: string | null;
+  dismissalCategory: DismissalCategory | null;
+  firstDecidedHidden: boolean | null;
 }
 
 interface FindingDetail extends FindingView {
@@ -108,13 +110,19 @@ interface FindingDetail extends FindingView {
  */
 export interface ListedFinding extends FindingView {
   drafts: number;
+  /**
+   * What the project's latest scan did to it, so a review can start with what
+   * changed: `new` if that scan first stored it, `reassessed` if it wrote the
+   * current verdict. Null for everything older, or with no scan recorded.
+   */
+  latestScan: LatestScanMark | null;
 }
 
 export interface ListOptions {
   project?: string;
   status?: TriageStatus[];
-  minScore?: number;
-  limit?: number;
+  /** Only these findings, e.g. a run's frozen inbox. */
+  ids?: number[];
 }
 
 /**
@@ -133,9 +141,13 @@ function latestAssessmentIds(database: ReturnType<typeof drizzle>) {
     .as("latest");
 }
 
-/** Findings with their latest assessment and current triage status, best first. */
+/**
+ * Findings with their latest assessment and current triage status, unordered and
+ * unbounded: the order is the score now, which is arithmetic over the clock, so
+ * `rank` in pipeline/score.ts orders, filters and bounds them after the read.
+ */
 export function latestFindings(options: ListOptions = {}): ListedFinding[] {
-  const { project, status, minScore, limit = 50 } = options;
+  const { project, status, ids } = options;
 
   const latest = latestAssessmentIds(db);
 
@@ -146,7 +158,7 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
     status?.length
       ? inArray(sql<TriageStatus>`coalesce(${schema.triage.status}, 'new')`, status)
       : undefined,
-    minScore !== undefined ? gte(schema.assessments.score, minScore) : undefined,
+    ids ? inArray(schema.findings.id, ids) : undefined,
   ].filter((f) => f !== undefined);
 
   const rows = db
@@ -155,6 +167,8 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
       assessment: schema.assessments,
       status: schema.triage.status,
       note: schema.triage.note,
+      dismissalCategory: schema.triage.dismissalCategory,
+      firstDecidedHidden: schema.triage.firstDecidedHidden,
       drafts: sql<number>`(select count(*) from ${schema.drafts} where ${schema.drafts.findingId} = ${schema.findings.id})`,
     })
     .from(schema.findings)
@@ -162,25 +176,37 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
     .leftJoin(schema.assessments, eq(schema.assessments.id, latest.assessmentId))
     .leftJoin(schema.triage, eq(schema.triage.findingId, schema.findings.id))
     .where(filters.length ? and(...filters) : undefined)
-    // `id` last: two assessments can share a stored timestamp, and without a
-    // monotonic tie-break their order is unspecified.
-    .orderBy(
-      desc(schema.assessments.score),
-      desc(schema.assessments.createdAt),
-      desc(schema.assessments.id),
-    )
-    .limit(limit)
     .all();
 
+  const latestRuns = new Map(latestRunPerProject().map((run) => [run.project, run]));
   return rows.map((row) => ({
     finding: row.finding,
     assessment: row.assessment,
+    latestScan: latestScanMark(row.finding, row.assessment, latestRuns.get(row.finding.project)),
     // A finding always gets a triage row on insert; the fallback covers a row
     // written before that invariant existed rather than a normal path.
     status: row.status ?? "new",
     note: row.note ?? null,
+    dismissalCategory: row.dismissalCategory ?? null,
+    firstDecidedHidden: row.firstDecidedHidden ?? null,
     drafts: row.drafts,
   }));
+}
+
+/**
+ * By run id on both sides, never by time: timestamps share a second, and scans
+ * of one project can overlap. A verdict recorded before assessments named their
+ * run is never marked, which undercounts rather than guesses.
+ */
+export function latestScanMark(
+  finding: Pick<schema.Finding, "firstRunId">,
+  assessment: Pick<schema.Assessment, "runId"> | null,
+  run: Pick<schema.Run, "id"> | undefined,
+): LatestScanMark | null {
+  if (!run) return null;
+  if (finding.firstRunId === run.id) return "new";
+  if (assessment?.runId === run.id) return "reassessed";
+  return null;
 }
 
 /**
@@ -197,6 +223,8 @@ export function findingById(id: number): FindingDetail | undefined {
       status: schema.triage.status,
       triageUpdatedAt: schema.triage.updatedAt,
       note: schema.triage.note,
+      dismissalCategory: schema.triage.dismissalCategory,
+      firstDecidedHidden: schema.triage.firstDecidedHidden,
     })
     .from(schema.findings)
     .leftJoin(latest, eq(latest.findingId, schema.findings.id))
@@ -212,6 +240,8 @@ export function findingById(id: number): FindingDetail | undefined {
     status: row.status ?? "new",
     triageUpdatedAt: row.triageUpdatedAt ?? null,
     note: row.note ?? null,
+    dismissalCategory: row.dismissalCategory ?? null,
+    firstDecidedHidden: row.firstDecidedHidden ?? null,
   };
 }
 
@@ -237,37 +267,132 @@ export function earlierAssessments(
     .all();
 }
 
+export interface TriageChange {
+  status: TriageStatus;
+  /** A string replaces the stored note, `null` clears it, omitted leaves it alone. */
+  note?: string | null;
+  /**
+   * A line added to the end of the stored note, in the same statement that reads
+   * it, so an edit saved since the caller last saw the note is kept. Exclusive
+   * with `note`.
+   */
+  appendNote?: string;
+  /**
+   * The same three states, while the status is `dismissed`. Any other status
+   * clears it: a category describes a dismissal, and one surviving a reopening
+   * would be counted as a cause for a finding nobody dismissed. Given with
+   * another status it is refused, so no front end can store it.
+   */
+  category?: DismissalCategory | null;
+  /**
+   * Whether the model's judgment was hidden while this was decided. Recorded
+   * only on a finding's first decision out of `new`; omitted means it was shown,
+   * which is true of the CLI, whose `list` and `show` print the reason.
+   */
+  hidden?: boolean;
+  /**
+   * An amendment to the decision already stored — a dismissal's category, a line
+   * after `acted` — rather than a new one: written only while the stored status
+   * is still `status`, since another front end may have changed it meanwhile.
+   * Throws `DecisionChanged` otherwise, having written nothing.
+   */
+  amend?: boolean;
+}
+
+/** An amendment found its decision already changed by someone else. */
+export class DecisionChanged extends Error {
+  constructor(findingId: number, expected: TriageStatus, found: TriageStatus | undefined) {
+    super(`#${findingId} is ${found ?? "new"} now, not ${expected}; nothing was changed.`);
+    this.name = "DecisionChanged";
+  }
+}
+
 /**
- * The operator's decision. `note` has three states, and the difference matters:
- * a string replaces the stored note, `null` clears it, and `undefined` leaves it
- * alone — Drizzle omits an undefined column from the update, which is what lets
- * `obserf triage <id> shortlisted` change a status without erasing the reasoning
- * already written against it.
+ * The operator's decision. Omitted fields are left as stored — Drizzle drops an
+ * undefined column from the update — which is what lets `obserf triage <id>
+ * shortlisted` change a status without erasing the reasoning written against it.
  *
- * Returns the status this replaced, so a caller can report or undo the change.
- * `returning()` would give the new status. This separate read is not atomic
- * with the write; another process can change the status between them.
+ * Returns the decision this replaced — status and dismissal category — so a
+ * caller can report the change or undo it whole; undoing a keystroke that moved
+ * a `paid` dismissal must not come back as a dismissal with no cause. Undefined
+ * when there was no triage row. The read and the write are separate statements,
+ * so another process can change the row between them.
  */
 export function setTriage(
   findingId: number,
-  status: TriageStatus,
-  note?: string | null,
-): TriageStatus | undefined {
+  change: TriageChange,
+): { status: TriageStatus; category: DismissalCategory | null } | undefined {
+  const { status, note, appendNote, category, hidden = false, amend = false } = change;
+  if (note !== undefined && appendNote !== undefined) {
+    throw new Error("Pass a note or a line to append to it, not both.");
+  }
+  if (category && status !== "dismissed") {
+    throw new Error(`A dismissal category needs status "dismissed", not "${status}".`);
+  }
+
   const previous = db
-    .select({ status: schema.triage.status })
+    .select({
+      status: schema.triage.status,
+      dismissalCategory: schema.triage.dismissalCategory,
+    })
     .from(schema.triage)
     .where(eq(schema.triage.findingId, findingId))
-    .get()?.status;
+    .get();
+
+  const values = {
+    status,
+    note,
+    dismissalCategory: status === "dismissed" ? category : null,
+    updatedAt: new Date(),
+  };
+  // Whether this is the first decision out of `new` is judged against the row
+  // as the update finds it, not as it was read above: two writers deciding at
+  // once (the CLI and the inbox) would otherwise both see `new` and the second
+  // would overwrite what the first recorded. SQLite evaluates every SET
+  // expression against the pre-update row.
+  const firstDecidedHidden =
+    status === "new"
+      ? {}
+      : {
+          firstDecidedHidden: sql`case when ${schema.triage.status} = 'new'
+                    and ${schema.triage.firstDecidedHidden} is null
+                    then ${hidden ? 1 : 0} else ${schema.triage.firstDecidedHidden} end`,
+        };
+  const appended =
+    appendNote === undefined
+      ? {}
+      : {
+          note: sql`case when coalesce(${schema.triage.note}, '') = '' then ${appendNote}
+                    else ${schema.triage.note} || char(10) || ${appendNote} end`,
+        };
+  if (amend) {
+    // Conditional in the statement, not on the read above, which another
+    // writer can have made stale.
+    const amended = db
+      .update(schema.triage)
+      .set({ ...values, ...appended })
+      .where(and(eq(schema.triage.findingId, findingId), eq(schema.triage.status, status)))
+      .returning({ findingId: schema.triage.findingId })
+      .get();
+    if (!amended) throw new DecisionChanged(findingId, status, previous?.status);
+    return previous && { status: previous.status, category: previous.dismissalCategory };
+  }
 
   db.insert(schema.triage)
-    .values({ findingId, status, note, updatedAt: new Date() })
+    .values({
+      findingId,
+      ...values,
+      ...(appendNote === undefined ? {} : { note: appendNote }),
+      // No row yet means no decision yet, so this one is the first.
+      ...(status === "new" ? {} : { firstDecidedHidden: hidden }),
+    })
     .onConflictDoUpdate({
       target: schema.triage.findingId,
-      set: { status, note, updatedAt: new Date() },
+      set: { ...values, ...appended, ...firstDecidedHidden },
     })
     .run();
 
-  return previous;
+  return previous && { status: previous.status, category: previous.dismissalCategory };
 }
 
 /**
@@ -381,6 +506,15 @@ export function recentRuns(options: { project?: string; limit?: number } = {}): 
     .orderBy(desc(schema.runs.id))
     .limit(limit)
     .all();
+}
+
+export function assessmentsByIds(ids: number[]): schema.Assessment[] {
+  if (!ids.length) return [];
+  return db.select().from(schema.assessments).where(inArray(schema.assessments.id, ids)).all();
+}
+
+export function runById(id: number): schema.Run | undefined {
+  return db.select().from(schema.runs).where(eq(schema.runs.id, id)).get();
 }
 
 /**

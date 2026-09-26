@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OPPORTUNITY_TYPES, defaultKindFor, draftContextNote } from "../vocabulary";
+import { OPPORTUNITY_TYPES, compactAge, defaultKindFor, draftContextNote } from "../vocabulary";
 
 describe("defaultKindFor", () => {
   test("a curated list takes a submission, not a comment", () => {
@@ -68,5 +68,31 @@ describe("draftContextNote", () => {
   test("an unrecorded source is not presented as fine", () => {
     expect(draftContextNote(null, null)).toMatchObject({ complete: false });
     expect(draftContextNote(null, null).text).toContain("not recorded");
+  });
+});
+
+describe("compactAge", () => {
+  const now = new Date("2026-09-25T12:00:00Z");
+  const ago = (hours: number) => new Date(now.getTime() - hours * 3_600_000);
+
+  test("steps up a unit as the number grows, rounding down", () => {
+    expect(compactAge(ago(5), now)).toBe("5h");
+    expect(compactAge(ago(24 * 13.9), now)).toBe("13d");
+    expect(compactAge(ago(24 * 14), now)).toBe("2w");
+    expect(compactAge(ago(24 * 69), now)).toBe("9w");
+    expect(compactAge(ago(24 * 70), now)).toBe("2mo");
+    expect(compactAge(ago(24 * 729), now)).toBe("23mo");
+    expect(compactAge(ago(24 * 730.2), now)).toBe("23mo");
+    expect(compactAge(ago(24 * 800), now)).toBe("2y");
+  });
+
+  test("an unknown date is said, and a future one is not negative", () => {
+    expect(compactAge(null, now)).toBe("?");
+    expect(compactAge(ago(-3), now)).toBe("0h");
+  });
+
+  /** The inbox receives dates as JSON strings. */
+  test("accepts the serialized form", () => {
+    expect(compactAge(ago(48).toISOString(), now)).toBe("2d");
   });
 });

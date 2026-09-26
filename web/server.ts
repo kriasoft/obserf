@@ -7,22 +7,27 @@ import { liveProfiles } from "../workspace";
 import { venueRuleFor, type ProjectProfile } from "../project";
 import {
   draftsFor,
+  earlierAssessments,
   findingById,
   latestFindings,
   latestRunPerProject,
   prepareDatabase,
   recentRuns,
   setTriage,
+  DecisionChanged,
   storedProjects,
 } from "../db";
 import {
+  DISMISSAL_CATEGORIES,
   DRAFT_KINDS,
   TRIAGE_STATUSES,
   defaultKindFor,
+  type DismissalCategory,
   type DraftKind,
   type TriageStatus,
 } from "../vocabulary";
 import { DraftRefused, generateDraft } from "../pipeline/draft";
+import { rank, scoreNow } from "../pipeline/score";
 import index from "./index.html";
 
 function json(data: unknown, status = 200): Response {
@@ -274,7 +279,9 @@ export async function serve(port = 4000) {
         const limit = intParam(url, "limit", 100, 1);
         if (limit instanceof Response) return limit;
 
-        return json(latestFindings({ project, status: status as TriageStatus[], minScore, limit }));
+        return json(
+          rank(latestFindings({ project, status: status as TriageStatus[] }), { minScore, limit }),
+        );
       }),
 
       "/api/findings/:id": local(async (req) => {
@@ -289,6 +296,10 @@ export async function serve(port = 4000) {
         const project = projects.find((p) => p.key === view.finding.project);
         return json({
           ...view,
+          score: scoreNow(view),
+          // Bounded by the current verdict's id, as `obserf show` is, so one a
+          // scan writes after this read is never filed as earlier.
+          earlier: view.assessment ? earlierAssessments(view.finding.id, view.assessment.id) : [],
           drafts: draftsFor(view.finding.id),
           // Distinguish missing profiles from missing rules; the inbox also
           // needs this to withhold drafting when the profile is gone.
@@ -318,14 +329,59 @@ export async function serve(port = 4000) {
           if (body.note !== undefined && typeof body.note !== "string") {
             return json({ error: "note must be a string" }, 400);
           }
+          // Omitted leaves a dismissal's category alone, `null` clears it — the
+          // three states `setTriage` gives the note.
+          const category = body.category;
+          if (
+            category !== undefined &&
+            category !== null &&
+            !DISMISSAL_CATEGORIES.includes(category as DismissalCategory)
+          ) {
+            return json({ error: `Unknown category "${String(category)}"` }, 400);
+          }
+          if (category && body.status !== "dismissed") {
+            return json({ error: "A category describes a dismissal" }, 400);
+          }
+          if (body.hidden !== undefined && typeof body.hidden !== "boolean") {
+            return json({ error: "hidden must be a boolean" }, 400);
+          }
+          if (body.amend !== undefined && typeof body.amend !== "boolean") {
+            return json({ error: "amend must be a boolean" }, 400);
+          }
+          if (
+            body.appendNote !== undefined &&
+            (typeof body.appendNote !== "string" || !body.appendNote.trim())
+          ) {
+            return json({ error: "appendNote must be a non-empty string" }, 400);
+          }
+          if (body.appendNote !== undefined && body.note !== undefined) {
+            return json({ error: "Send note or appendNote, not both" }, 400);
+          }
           // An emptied note box means no note, not an empty one. Omitting `note`
           // entirely still leaves whatever is stored alone — see `setTriage`.
           const note = typeof body.note === "string" ? body.note.trim() || null : undefined;
-          // The status this replaced, so the inbox can offer to undo a keystroke
+          // The decision this replaced, so the inbox can offer to undo a keystroke
           // it cannot otherwise take back. Read here rather than from the row the
           // browser was rendering, which a queued write may already have changed.
-          const previous = setTriage(id, body.status as TriageStatus, note);
-          return json({ ok: true, previous: previous ?? null });
+          let previous;
+          try {
+            previous = setTriage(id, {
+              status: body.status as TriageStatus,
+              note,
+              appendNote: typeof body.appendNote === "string" ? body.appendNote.trim() : undefined,
+              category: category as DismissalCategory | null | undefined,
+              hidden: body.hidden,
+              amend: body.amend,
+            });
+          } catch (error) {
+            if (error instanceof DecisionChanged) return json({ error: error.message }, 409);
+            throw error;
+          }
+          return json({
+            ok: true,
+            previous: previous?.status ?? null,
+            previousCategory: previous?.category ?? null,
+          });
         }),
       },
 

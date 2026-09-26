@@ -4,7 +4,8 @@
 
 import { eq } from "drizzle-orm";
 import { config } from "../config";
-import { db, knownFindings, knownFindingsForDryRun, schema } from "../db";
+import { db, knownFindings, knownFindingsForDryRun, latestFindings, schema } from "../db";
+import type { FrozenInboxEntry } from "../db/schema";
 import { emptyUsage, pool, type Usage } from "../agent";
 import type { ProjectProfile } from "../project";
 import { selectSources, type Candidate } from "../sources";
@@ -12,7 +13,7 @@ import type { SourceId } from "../vocabulary";
 import { assess, assessPromptFingerprint } from "./assess";
 import { enrichSurvivors, type EnrichEvent } from "./enrich";
 import { gate, type GateRule } from "./gate";
-import { score } from "./score";
+import { rank, score } from "./score";
 
 export interface ScanOptions {
   /** Overrides the project's default sources. */
@@ -41,6 +42,8 @@ export interface ScanResult {
   /** Assessed findings that scored above zero, best first. Empty in a dry run. */
   scored: Array<{ findingId: number; score: number; title: string; url: string }>;
   usage: Usage;
+  /** The run row this scan wrote, whose frozen inbox `list --run` reads. Null in a dry run. */
+  runId: number | null;
 }
 
 export async function scan(
@@ -168,16 +171,31 @@ export async function scan(
       assessed: 0,
       scored: [],
       usage,
+      runId: null,
     };
   }
 
   let done = 0;
   const stored: Array<{ findingId: number; score: number; title: string; url: string }> = [];
 
-  // Finalize successful runs and failures during enrichment, assessment, or persistence.
-  const finalize = (assessError?: unknown) => {
-    const error =
-      assessError instanceof Error ? assessError.message : assessError ? String(assessError) : null;
+  // Finalize successful runs and failures during enrichment, assessment, or
+  // persistence. `failure` is a box so that a thrown falsy value — or an error
+  // with an empty message — still reads as a failure.
+  const finalize = (failure: { cause: unknown } | null) => {
+    let error = failure ? messageOf(failure.cause) : null;
+    // Only a clean finish freezes: a failed scan's inbox is not what it would
+    // have shown. A freeze that fails is itself the scan's failure, recorded on
+    // the row before it propagates, so the run is not left looking unfinished.
+    let inbox: FrozenInboxEntry[] | null = null;
+    let freezeFailure: unknown;
+    if (!failure) {
+      try {
+        inbox = frozenInbox(project.key);
+      } catch (cause) {
+        freezeFailure = cause;
+        error = `Freezing the inbox failed: ${messageOf(cause)}`;
+      }
+    }
     db.update(schema.runs)
       .set({
         finishedAt: new Date(),
@@ -187,9 +205,11 @@ export async function scan(
         assessed: stored.length,
         ...usage,
         error,
+        inbox,
       })
       .where(eq(schema.runs.id, run!.id))
       .run();
+    if (freezeFailure !== undefined) throw freezeFailure;
   };
 
   try {
@@ -199,18 +219,18 @@ export async function scan(
     await pool(enriched, config.assessConcurrency, async (candidate) => {
       const verdict = await assess(project, candidate, usage);
       const value = score(verdict, candidate.publishedAt);
-      const findingId = persist(project, candidate, run!.id, verdict, value, fingerprint);
+      const findingId = persist(project, candidate, run!.id, verdict, fingerprint);
       // Recorded as each one lands, so a mid-scan failure still leaves the run
       // row describing the work completed and kept.
       stored.push({ findingId, score: value, title: candidate.title, url: candidate.url });
       onProgress({ type: "assessed", done: ++done, total: enriched.length, score: value });
     });
   } catch (error) {
-    finalize(error);
+    finalize({ cause: error });
     throw error;
   }
 
-  finalize();
+  finalize(null);
 
   return {
     skipped,
@@ -220,7 +240,35 @@ export async function scan(
     assessed: stored.length,
     scored: stored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score),
     usage,
+    runId: run!.id,
   };
+}
+
+/** Never empty: an empty `error` would read back as a clean run. */
+function messageOf(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return message || "failed without a message";
+}
+
+/**
+ * The ten findings the operator is shown first after this scan, as the bar in
+ * docs/product/evaluation.md counts them: the top of the default inbox, `new`
+ * and scoring above zero. Only undecided findings, so a scan cannot pass on
+ * judgments made in an earlier review — a finding shortlisted last week says
+ * nothing about this ranking.
+ *
+ * The whole inbox, not only what this run assessed: an earlier run's finding
+ * that the gate passed over as `unchanged` and nobody has decided yet still sits
+ * at the top of what the operator reviews.
+ */
+function frozenInbox(project: string): FrozenInboxEntry[] {
+  const undecided = latestFindings({ project, status: ["new"] });
+  // Every row above zero has an assessment; the guard only tells the compiler.
+  return rank(undecided, { minScore: 1, limit: 10 }).flatMap((row) =>
+    row.assessment
+      ? [{ findingId: row.finding.id, assessmentId: row.assessment.id, score: row.score }]
+      : [],
+  );
 }
 
 /**
@@ -232,7 +280,6 @@ function persist(
   candidate: Candidate,
   runId: number,
   verdict: Awaited<ReturnType<typeof assess>>,
-  value: number,
   promptFingerprint: string,
 ): number {
   return db.transaction((tx) => {
@@ -284,6 +331,7 @@ function persist(
     tx.insert(schema.assessments)
       .values({
         findingId: id,
+        runId,
         model: config.model,
         promptFingerprint,
         relevance: verdict.relevance,
@@ -293,7 +341,6 @@ function persist(
         opportunity: verdict.opportunity,
         disqualified: verdict.disqualified,
         reason: verdict.reason,
-        score: value,
         createdAt: new Date(),
       })
       .run();

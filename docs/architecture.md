@@ -58,7 +58,6 @@ pipeline/
   enrich.ts          Post-gate adapter evidence, and the one-for-one contract
   assess.ts          One structured model call per candidate
   score.ts           Components → 0-100, pure
-  rescore.ts         Re-runs score over stored components; no model
   draft-context.ts   Draft-time context fetch (plain HTTP, no browser)
   draft.ts           Comment/reply/submission generation
 web/
@@ -96,7 +95,7 @@ That connection refuses SQL writes (`query_only`) but is opened read-write, beca
 
 **Assess.** Each survivor gets one `askForJson` call with a Zod-constrained schema. The system prompt is the rubric plus the project profile — identical for every candidate in a scan, so it caches; the candidate is the only part that varies. Calls run through a small concurrency pool.
 
-**Score.** A pure function turns components into 0–100 ([ADR-003](adr/003-model-scores-components-code-ranks.md)). It is the only place the weights appear, and `obserf rescore` re-runs it over stored components without touching the model.
+**Score.** A pure function turns components into 0–100 ([ADR-003](adr/003-model-scores-components-code-ranks.md)). It is the only place the weights appear, and no assessment stores its output: `list`, `show` and the inbox run it over the stored components on every read, so decay and a weight change reach the ranking without the model or a maintenance command. The one stored score is a scan's frozen inbox (`runs.inbox`), which keeps what its ten scored when the scan finished, because that is the record the bar is judged on.
 
 **Store.** The finding is inserted or its snapshot refreshed, the assessment appended, and a `triage` row created with status `new` if absent.
 
@@ -112,7 +111,7 @@ Only successfully assessed gate survivors reach storage; rejected candidates ref
 
 **Database snapshots.** Filenames record the reason after the UTC timestamp: `manual` for an operator request, `upgrade` before a migration, and `replaced` for the database saved before a restore. Older names without a reason remain valid and display as `unlabelled`. Listing filters by the current database’s filename and path hash, then validates the timestamp and optional reason suffix; it does not inspect file contents. Snapshots are sorted by the parsed timestamp, independent of modification times that copying may change, and displayed in local time. `restore` without an argument chooses the newest listed snapshot. Explicit filenames and paths bypass the naming filter, but every restore checks the source’s SQLite integrity before snapshotting and replacing the destination.
 
-**Triage.** Both `obserf triage` and the inbox call `setTriage`: a string note replaces the stored value, `null` clears it, and `undefined` preserves it. The HTTP route trims strings and converts an empty string to `null`; the CLI passes `--note` through unchanged. The inbox sends status and note through the same endpoint and serializes its writes so a note save followed by a status change lands in that order. `setTriage` returns the prior status for reporting and the inbox’s single-level undo, which leaves notes untouched. Its read and write are separate statements, so the prior status is not an atomic snapshot if another process writes concurrently.
+**Triage.** Both `obserf triage` and the inbox call `setTriage`: a string note replaces the stored value, `null` clears it, and `undefined` preserves it. The HTTP route trims strings and converts an empty string to `null`; the CLI passes `--note` through unchanged. The inbox sends status and note through the same endpoint and serializes its writes so a note save followed by a status change lands in that order. A dismissal category follows the note's three states while the status is `dismissed`, and any other status clears it, so a count of causes never includes a finding nobody dismissed; both front ends refuse one given with another status. `appendNote` adds a line to the stored note in the same statement that reads it — how the inbox records where an `acted` finding was posted without overwriting a note edited since. Both inbox amendments — that line and a category typed after `d` — pass `amend`, which writes only while the stored status is still the one amended and otherwise answers 409, so neither can reinstate a decision the CLI has since changed. The first decision out of `new` also records whether the model's judgment was hidden while it was made (the inbox sends `hidden`; the CLI counts as shown), once, never on a later reopening. `setTriage` returns the prior status for reporting and the inbox’s single-level undo, which leaves notes untouched. Its read and write are separate statements, so the prior status is not an atomic snapshot if another process writes concurrently.
 
 **Draft.** Separate from the scan and initiated by the operator. Before writing, `draft-context.ts` fetches the source as it stands — Hacker News through Algolia's item API, GitHub issues, pull requests and repository READMEs through GitHub's REST API, everything else as HTML with tags stripped. Assessment uses discovery text and any enrichment, which do not necessarily include the current conversation; fetching here rather than during a scan keeps the cost proportionate, since a scan touches a hundred candidates and drafting touches the one or two the operator chose. A dead or removed page also surfaces at the moment it matters. Drafting refuses before the model call only on a fact the fetch established: the official Hacker News API reports the item deleted or dead, or the story a comment belongs to dead (a killed submission's thread takes no new comments); GitHub answers 410 or 404 for an issue or pull request, or reports it locked. A 404 may only mean the thread is hidden from Obserf's access, and a lock does not bind collaborators; Obserf can tell neither, and has nothing it can stand behind. Anything it cannot establish drafts with a warning: a timeout or unreachable page from the stored excerpt, a failed Hacker News status check beside the thread. A README 404 is checked against the repository, since a list without a README is still a list to submit to; a closed but unlocked issue is drafted from its current text. The gate's rule applies here too: facts, not judgment.
 
@@ -126,11 +125,11 @@ Every route reports what limits its context — a truncated thread, comments pas
 | --- | --- | --- | --- |
 | `runs` | `scan` | Checkpointed after discovery, finalized at completion | `id` |
 | `findings` | `scan` | Refreshed after successful assessment; `discoveredAt` fixed | unique `(project, url)` |
-| `assessments` | `scan`, `rescore` | Append-only, except the derived `score` | `finding_id` |
+| `assessments` | `scan` | Append-only | `finding_id` |
 | `triage` | `scan` initializes; operator updates | Operator decisions survive rescans | `finding_id` (unique) |
 | `drafts` | `draft` | Append-only | `finding_id` |
 
-The separation is [ADR-002](adr/002-evidence-judgment-decision.md). Reading "the current state of a finding" therefore means joining its latest assessment and its triage row — done in `db/index.ts`, by `latestFindings()` for a ranked list and `findingById()` for one finding, through the same latest-assessment subquery, rather than reconstructed per caller.
+The separation is [ADR-002](adr/002-evidence-judgment-decision.md). Reading "the current state of a finding" therefore means joining its latest assessment and its triage row — done in `db/index.ts`, by `latestFindings()` for many findings and `findingById()` for one, through the same latest-assessment subquery, rather than reconstructed per caller. `latestFindings()` returns them unordered: the order is the score now, so its callers pass the rows to `rank()` in `pipeline/score.ts`, which scores, filters, orders and bounds them.
 
 ## Model use
 
@@ -138,6 +137,6 @@ Obserf calls the model through the **Claude Agent SDK**, on the operator's Claud
 
 `agent.ts` is the entire surface: `ask` for prose, `askForJson` for a schema-constrained verdict, `pool` for concurrency. Assessment goes through `askForJson`, so a malformed verdict fails before it reaches the database rather than being stored as a plausible-looking row; drafting uses `ask`, since the output is prose a human will edit.
 
-`obserf runs` reads the `runs` table back: which sources ran and which were skipped, the gate breakdown, what was assessed, and the token spend. A null `skipped` means the run never recorded which sources ran — distinct from an empty `skipped`, which says every selected source ran.
+`obserf runs` reads the `runs` table back: which sources ran and which were skipped, the gate breakdown, what was assessed, and the token spend. A null `skipped` means the run never recorded which sources ran — distinct from an empty `skipped`, which says every selected source ran. A clean finish also freezes `inbox`: the project's top ten `new` findings with the scores they had then, which `obserf list --run <id>` reads back as the cohort [the bar](product/evaluation.md#the-bar) is counted on. The live ranking cannot serve: it is recomputed against the clock on every read, and labelling a finding moves it out of the default list.
 
 Token usage is accumulated per run across every model the SDK touched — including its auxiliary calls — and stored on the `runs` row. `estimated_cost_usd` alongside it is the SDK's list-price figure, useful for comparing scans and not an invoice: on a subscription nothing is billed per call.

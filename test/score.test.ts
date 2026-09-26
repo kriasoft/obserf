@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { freshness, score } from "../pipeline/score";
+import { freshness, rank, score } from "../pipeline/score";
 
 const NOW = new Date("2026-09-09T00:00:00Z");
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * 86_400_000);
@@ -80,5 +80,52 @@ describe("freshness", () => {
       NOW,
     );
     expect(staleStrong).toBeLessThan(freshWeak);
+  });
+});
+
+describe("rank", () => {
+  let nextId = 1;
+  const row = (
+    components: Partial<typeof perfect>,
+    publishedAt: Date,
+    assessedAt = publishedAt,
+  ) => ({
+    finding: { publishedAt },
+    assessment: { ...perfect, ...components, id: nextId++, createdAt: assessedAt },
+  });
+
+  /**
+   * The reason nothing is stored: at assessment the old thread outscored the
+   * fresh one, and a stored score would still rank it first today.
+   */
+  test("orders by the score at `now`, not at assessment", () => {
+    const old = row({}, daysAgo(90));
+    const fresh = row({ intent: 2, reach: 2 }, daysAgo(1));
+    expect(score(old.assessment, old.finding.publishedAt, old.finding.publishedAt)).toBeGreaterThan(
+      score(fresh.assessment, fresh.finding.publishedAt, fresh.finding.publishedAt),
+    );
+    expect(rank([old, fresh], { now: NOW }).map((r) => r.assessment.id)).toEqual([
+      fresh.assessment.id,
+      old.assessment.id,
+    ]);
+  });
+
+  test("filters and bounds after scoring, so `limit` keeps the best", () => {
+    const rows = [row({ reach: 1 }, NOW), row({ relevance: 0 }, NOW), row({}, NOW)];
+    const ranked = rank(rows, { minScore: 1, limit: 1, now: NOW });
+    expect(ranked).toEqual([{ ...rows[2]!, score: 100 }]);
+  });
+
+  test("breaks a tie by the newer verdict", () => {
+    const earlier = row({}, NOW, daysAgo(2));
+    const later = row({}, NOW, daysAgo(1));
+    expect(rank([earlier, later], { now: NOW })[0]?.assessment.id).toBe(later.assessment.id);
+  });
+
+  test("a finding without an assessment scores zero and sorts last", () => {
+    const unassessed = { finding: { publishedAt: NOW }, assessment: null };
+    const ranked = rank([unassessed, row({ reach: 1 }, NOW)], { now: NOW });
+    expect(ranked.map((r) => r.score)).toEqual([score({ ...perfect, reach: 1 }, NOW, NOW), 0]);
+    expect(rank([unassessed], { minScore: 1, now: NOW })).toEqual([]);
   });
 });

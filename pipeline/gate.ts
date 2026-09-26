@@ -8,7 +8,7 @@
  * findings. See docs/adr/004-deterministic-gates-before-the-model.md.
  */
 
-import type { TriageStatus } from "../vocabulary";
+import { SETTLED, type TriageStatus } from "../vocabulary";
 import type { Candidate } from "../sources";
 import { canonicalizeUrl, hostOf } from "../url";
 
@@ -117,7 +117,7 @@ export function gate(candidates: Candidate[], options: GateOptions): GateResult 
     // The operator has ruled on it, and their decision outranks every other
     // rule — which is why this runs before the content checks. It is reported as
     // `settled` rather than as whichever fact also happens to be true of it.
-    if (seen && (seen.status === "dismissed" || seen.status === "acted")) {
+    if (seen && SETTLED.has(seen.status)) {
       rejected.settled++;
       continue;
     }

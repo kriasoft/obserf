@@ -18,9 +18,9 @@ It needs **Bun 1.4 or later** and **Claude Code signed in with a subscription** 
 ## How it works
 
 1. **Discover** — your profile's queries go to Hacker News, Reddit, GitHub and Brave.
-2. **Gate** — deterministic rules drop duplicates, findings you dismissed or acted on, blocked domains, stale or thin pages, and anything assessed recently that has not changed. None of this costs a model call.
+2. **Gate** — deterministic rules drop duplicates, findings you skipped, dismissed or acted on, blocked domains, stale or thin pages, and anything assessed recently that has not changed. None of this costs a model call.
 3. **Assess** — Claude rates each survivor and gives a reason, with extra evidence where a source can fetch it, such as a GitHub list's merge activity. Code turns the ratings into a 0–100 score.
-4. **Review** — in the terminal or a local web inbox: shortlist, dismiss, or mark as acted on.
+4. **Review** — in the terminal or a local web inbox: shortlist, skip, dismiss, or mark as acted on.
 5. **Draft** — on request, from the thread's current text where Obserf can fetch it, otherwise the stored excerpt. You edit it and post it yourself.
 
 An opportunity must be **useful, permitted, and free**, with a public way to take part: a comment, a reply, or a submission. The model has no tools and cannot read a venue's rules or pricing, so a finding is only not known to be forbidden and not known to cost money. Read the thread and the venue's rules before you post.
@@ -105,13 +105,13 @@ bun run obserf list --project example
 bun run obserf show 42
 ```
 
-Use a finding ID from `list` in place of `42`. `list` shows the top 20 findings with status `new` and a score of at least 1. `--limit` changes the count, `--status` the status, and `--min 0` includes zero-scored findings. Piped or redirected, output is plain text with one line per reason, so `obserf list | grep` and `obserf show 42 | pbcopy` work. `show` prints a finding in full:
+Use a finding ID from `list` in place of `42`. `list` shows the top 20 findings with status `new` and a score of at least 1. `--limit` changes the count, `--status` the status, and `--min 0` includes zero-scored findings. Each row shows the thread's age, and `new` or `reassessed` when the project's latest scan first stored it or judged it again, which is where a review picks up; the inbox shows the same. Piped or redirected, output is plain text with one line per reason, so `obserf list | grep` and `obserf show 42 | pbcopy` work. `show` prints a finding in full:
 
 - its reason, score components and excerpt;
 - the author, and whether it is one comment inside a thread;
 - repository activity where there is some;
 - its drafts;
-- every verdict it has received, each with the model and prompt fingerprint behind it.
+- every verdict it has received, each with the model and the fingerprint of the rubric and brief behind it.
 
 Read the linked thread and the venue's rules, then shortlist and draft:
 
@@ -132,29 +132,35 @@ After posting:
 bun run obserf triage 42 acted --note "Posted a reply"
 ```
 
-Use `dismissed` for findings you will not pursue. Scans keep your triage decisions and do not reassess a finding while it is dismissed or acted on; set it back to `new` to reopen it.
+Use `skipped` for a good finding you will not pursue, and `dismissed` for one Obserf should not have shown you, with `--category` saying why (`obserf help` lists them) — it names what to fix, usually a line in `notFor`. The difference matters: only dismissals count against the ranking. Scans keep your triage decisions and do not reassess a finding while it is skipped, dismissed or acted on; set it back to `new` to reopen it.
 
 ### Review inbox
 
-`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. It is unauthenticated and bound to the local machine. It picks up an edited profile when you return to it; if the edit does not load, it keeps the last version that did and turns drafting off until you fix it. A module the config or a profile imports is not reloaded, so restart it after editing one of those.
+`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. **hide reasons** keeps the model's score and reason off a new finding until you have judged it yourself. It is unauthenticated and bound to the local machine. It picks up an edited profile when you return to it; if the edit does not load, it keeps the last version that did and turns drafting off until you fix it. A module the config or a profile imports is not reloaded, so restart it after editing one of those.
 
 | Key | What it does |
 | --- | --- |
 | <kbd>j</kbd> <kbd>k</kbd> or <kbd>↓</kbd> <kbd>↑</kbd> | Move through the list |
 | <kbd>o</kbd> | Open the selected page |
-| <kbd>n</kbd> <kbd>s</kbd> <kbd>d</kbd> <kbd>a</kbd> | Set the status to new, shortlisted, dismissed or acted |
+| <kbd>n</kbd> <kbd>s</kbd> <kbd>a</kbd> | Set the status to new, shortlisted or acted |
+| <kbd>x</kbd> | Skipped: a good finding you will not pursue. Counts as Obserf being right |
+| <kbd>d</kbd> | Dismissed: Obserf should not have shown it. Counts against it |
 | <kbd>u</kbd> | Undo the last status change in this tab |
+| <kbd>1</kbd>–<kbd>8</kbd> | Right after <kbd>d</kbd>: why it was dismissed, which names what to fix |
+| After <kbd>a</kbd> | A field asks where it was posted; <kbd>Enter</kbd> adds it to the note, <kbd>Esc</kbd> skips |
+| <kbd>r</kbd> | Reveal the model's judgment while **hide reasons** is on |
+| <kbd>W</kbd> | Write the suggested draft (Shift+W; it uses model quota) |
+| <kbd>c</kbd> | Copy the newest draft |
 
 Shortcuts are off while you edit a note or use a filter. Notes save when the editor loses focus. Under the filters, the inbox shows the latest scan for each project in view, and says when one skipped a source, never finished, or failed. A short list isn't a quiet week unless the latest scan actually ran. The list stops at 200 results; `200+` means narrow the filters.
 
 ## Ranking and rescans
 
-Claude rates `relevance`, `intent`, `welcome` and `reach` from 0 to 5, and code computes the 0–100 score. Zero relevance, zero welcome, or a disqualification makes the score zero. Threads lose score with age and listings do not, but a stored score only changes when it is reassessed or rescored. A score is a review priority, not proof that promotion is allowed. See [Scoring](docs/product/scoring.md).
+Claude rates `relevance`, `intent`, `welcome` and `reach` from 0 to 5, and code computes the 0–100 score. Zero relevance, zero welcome, or a disqualification makes the score zero. Threads lose score with age and listings do not. No score is stored with a verdict: `list`, `show` and the inbox compute it from the stored ratings and the thread's age today. The exception is a scan's frozen top 10 (`list --run`), which keeps the scores it had when the scan finished. A score is a review priority, not proof that promotion is allowed. See [Scoring](docs/product/scoring.md).
 
-When a scan rediscovers a finding you have not dismissed or acted on, it reassesses it if its title, excerpt or engagement changed materially, or once the reassessment interval has passed: 7 days by default, and 30 for one the model disqualified. The other gates still apply.
+When a scan rediscovers a finding you have not skipped, dismissed or acted on, it reassesses it if its title, excerpt or engagement changed materially, or once the reassessment interval has passed: 7 days by default, and 30 for one the model disqualified. The other gates still apply.
 
 ```bash
-bun run obserf rescore [--project <key>]    # refresh age decay or apply new weights, no model calls
 bun run obserf runs [--project <key>]       # what recent scans ran, dropped and spent
 ```
 
@@ -192,10 +198,10 @@ Run them from the workspace as `bun run obserf <command>`. Each accepts only its
 | --- | --- |
 | `scan [--project k] [--source id] [--dry-run]` | Discover, gate, enrich, assess; every project unless `--project` |
 | `list [--project k] [--status s] [--min n] [--limit n]` | The ranked findings |
+| `list --run n` | The top 10 as scan `n` left them, frozen for review, and the bar result |
 | `show <id>` | One finding in full, with its drafts |
 | `draft <id> [--kind comment\|reply\|submission]` | Write a draft for it |
-| `triage <id> <new\|shortlisted\|dismissed\|acted> [--note "…"]` | Record what you decided |
-| `rescore [--project k]` | Recompute scores from stored ratings; no model calls |
+| `triage <id> <new\|shortlisted\|skipped\|dismissed\|acted> [--note "…"] [--category c]` | Record what you decided, and why a dismissal |
 | `runs [--project k] [--limit n]` | Recent scans: what ran, what the gate dropped, what it spent |
 | `projects` | The workspace's projects |
 | `serve [--port n]` | The local review inbox |

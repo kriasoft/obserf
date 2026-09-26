@@ -10,6 +10,7 @@ import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-or
 // Not re-exported: the tables are this module's to own, the vocabulary is not,
 // and a second import route would make `db/schema.ts` look like its home.
 import type {
+  DismissalCategory,
   DraftContextSource,
   DraftKind,
   OpportunityType,
@@ -51,7 +52,22 @@ export const runs = sqliteTable("runs", {
    */
   estimatedCostUsd: real("estimated_cost_usd").notNull().default(0),
   error: text("error"),
+  /**
+   * The top of the project's inbox when the scan finished, best first, with the
+   * score each had then — the cohort the bar in docs/product/evaluation.md is
+   * judged on. Frozen because the live inbox reorders as the clock moves and
+   * shrinks as findings are triaged. Null when the scan did not finish cleanly,
+   * or finished before this was recorded.
+   */
+  inbox: text("inbox", { mode: "json" }).$type<FrozenInboxEntry[]>(),
 });
+
+export interface FrozenInboxEntry {
+  findingId: number;
+  /** The verdict it was ranked on, for the model and prompt behind the cohort. */
+  assessmentId: number;
+  score: number;
+}
 
 /**
  * The latest successfully assessed snapshot of a finding.
@@ -118,6 +134,8 @@ export const assessments = sqliteTable(
     findingId: integer("finding_id")
       .notNull()
       .references(() => findings.id, { onDelete: "cascade" }),
+    /** The scan that made it. Null for a verdict recorded before this was. */
+    runId: integer("run_id").references(() => runs.id),
     model: text("model").notNull(),
     /**
      * Hash of the rubric plus the project brief that produced this verdict.
@@ -126,7 +144,9 @@ export const assessments = sqliteTable(
      */
     promptFingerprint: text("prompt_fingerprint").notNull(),
 
-    // Components, 0-5. The model produces these; it never produces `score`.
+    // Components, 0-5. The model produces these; it never produces a score, and
+    // none is stored: the score depends on the clock, so pipeline/score.ts
+    // computes it on every read.
     relevance: integer("relevance").notNull(),
     intent: integer("intent").notNull(),
     welcome: integer("welcome").notNull(),
@@ -136,8 +156,6 @@ export const assessments = sqliteTable(
     disqualified: integer("disqualified", { mode: "boolean" }).notNull().default(false),
     reason: text("reason").notNull(),
 
-    /** Derived by pipeline/score.ts. A cache of the arithmetic, not an input. */
-    score: real("score").notNull(),
     createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   },
   (t) => [index("assessments_finding").on(t.findingId, t.createdAt)],
@@ -152,6 +170,15 @@ export const triage = sqliteTable(
       .references(() => findings.id, { onDelete: "cascade" }),
     status: text("status").$type<TriageStatus>().notNull().default("new"),
     note: text("note"),
+    /** Why it was dismissed. Non-null only while `status` is `dismissed`. */
+    dismissalCategory: text("dismissal_category").$type<DismissalCategory>(),
+    /**
+     * Whether the first decision out of `new` was made with the model's score and
+     * reason hidden — the bias docs/product/evaluation.md asks the operator to
+     * avoid. Written once, on that decision, and never again: a later reopening is
+     * made by someone who has seen the first verdict. Null before it was recorded.
+     */
+    firstDecidedHidden: integer("first_decided_hidden", { mode: "boolean" }),
     updatedAt: integer("updated_at", { mode: "timestamp" })
       .notNull()
       .default(sql`(unixepoch())`),

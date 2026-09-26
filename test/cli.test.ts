@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  barResult,
   clipped,
   colourable,
   describeSources,
@@ -12,7 +13,7 @@ import {
   wrapped,
 } from "../cli";
 import { migrate } from "../db/migrate";
-import type { TriageStatus } from "../vocabulary";
+import type { DismissalCategory, TriageStatus } from "../vocabulary";
 
 /**
  * The CLI run as a CLI, for the properties that are about the process rather
@@ -73,7 +74,7 @@ describe("--project resolution", () => {
   test("reports a profile that will not load, rather than calling the key unknown", async () => {
     const root = workspaceWithStoredProject();
     writeFileSync(join(root, "projects", "broken.ts"), `throw new Error("profile is broken");`);
-    const { code, output } = await run(root, "rescore", "--project", "p");
+    const { code, output } = await run(root, "runs", "--project", "p");
     expect(code).not.toBe(0);
     expect(output).toContain("profile is broken");
     expect(output).not.toContain("Unknown project");
@@ -82,7 +83,7 @@ describe("--project resolution", () => {
   test("still reads a retired project without loading any profile", async () => {
     const root = workspaceWithStoredProject();
     writeFileSync(join(root, "projects", "broken.ts"), `throw new Error("profile is broken");`);
-    const { code } = await run(root, "rescore", "--project", "retired");
+    const { code } = await run(root, "runs", "--project", "retired");
     expect(code).toBe(0);
   });
 
@@ -101,7 +102,7 @@ describe("--project resolution", () => {
   test("is still named as unknown once every profile is retired", async () => {
     const root = workspaceWithStoredProject();
     rmSync(join(root, "projects", "p.ts"));
-    const { code, output } = await run(root, "rescore", "--project", "missing");
+    const { code, output } = await run(root, "runs", "--project", "missing");
     expect(code).not.toBe(0);
     expect(output).toContain(`Unknown project "missing". Available: retired`);
   });
@@ -109,7 +110,7 @@ describe("--project resolution", () => {
   test("a typo with no projects at all creates no database", async () => {
     const root = workspace();
     rmSync(join(root, "projects", "p.ts"));
-    const { code, output } = await run(root, "rescore", "--project", "missing");
+    const { code, output } = await run(root, "runs", "--project", "missing");
     expect(code).not.toBe(0);
     expect(output).toContain(`Unknown project "missing". No projects are available.`);
     expect(existsSync(join(root, ".obserf"))).toBe(false);
@@ -130,7 +131,7 @@ describe("--project resolution", () => {
   });
 
   test("an empty key is refused rather than meaning every project", async () => {
-    const { code, output } = await run(workspace(), "rescore", "--project", "");
+    const { code, output } = await run(workspace(), "runs", "--project", "");
     expect(code).not.toBe(0);
     expect(output).toContain("--project was given no value");
   });
@@ -274,10 +275,10 @@ describe("a finding read back", () => {
     );
     handle.run("UPDATE findings SET author = 'alice', is_thread_comment = 1, first_run_id = 2");
     const assess = handle.query(
-      "INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent, welcome, reach, opportunity, disqualified, reason, score, created_at) VALUES (1,?,?,?,?,?,?,'thread',?,?,?,0)",
+      "INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent, welcome, reach, opportunity, disqualified, reason, created_at) VALUES (1,?,?,?,?,?,?,'thread',?,?,0)",
     );
-    assess.run("model-a", "fp-old", 4, 4, 1, 3, 1, "old reason", 0);
-    assess.run("model-b", "fp-new", 4, 4, 4, 3, 0, "new reason", 72);
+    assess.run("model-a", "fp-old", 4, 4, 1, 3, 1, "old reason");
+    assess.run("model-b", "fp-new", 4, 4, 4, 3, 0, "new reason");
     handle.run("INSERT INTO triage (finding_id, status) VALUES (1, 'shortlisted')");
     handle.run(
       "INSERT INTO drafts (finding_id, kind, body, model, created_at) VALUES (1, 'reply', 'body', 'model-d', 0)",
@@ -291,15 +292,15 @@ describe("a finding read back", () => {
     expect(output).toContain("one comment inside a thread, not the thread itself · author: alice");
     expect(output).toContain("first seen");
     expect(output).toContain("in scan #2 · triage updated");
-    expect(output).toContain("model-b · prompt fp-new");
+    expect(output).toContain("model-b · rubric/brief fp-new");
     // Seeded without provenance, as every draft written before it was stored.
     expect(output).toContain("context source not recorded");
     const earlier = output.slice(output.indexOf("Earlier assessments"));
-    // No score: `rescore` would have rewritten it. The flag leads, since none of
-    // the components shows it.
+    // No score: none is stored for a snapshot not kept. The flag leads, since
+    // none of the components shows it.
     expect(earlier).toContain("  disqualified · relevance 4 · intent 4 · welcome 1 · reach 3");
     expect(earlier).toContain("snapshots not kept");
-    expect(earlier).toContain("model-a · prompt fp-old");
+    expect(earlier).toContain("model-a · rubric/brief fp-old");
     expect(earlier).toContain("thread — old reason");
     expect(earlier).not.toContain("fp-new");
     // A draft names its own model, which need not be the verdict's.
@@ -502,15 +503,18 @@ describe("a surplus argument", () => {
   });
 });
 
-/** A database seeded with one assessed HN finding per `[project, score, status]`. */
+/**
+ * A database seeded with one assessed HN finding per `[project, relevance, status]`.
+ * Relevance 0 scores zero; any other value scores above it.
+ */
 function workspaceWithFindings(
-  ...rows: [project: string, score: number, status: TriageStatus | null][]
+  ...rows: [project: string, relevance: number, status: TriageStatus | null][]
 ): string {
   const root = workspace();
   mkdirSync(join(root, ".obserf"), { recursive: true });
   const handle = new Database(join(root, ".obserf", "obserf.db"), { create: true });
   migrate(handle);
-  rows.forEach(([project, score, status], i) => {
+  rows.forEach(([project, relevance, status], i) => {
     const id = i + 1;
     handle
       .query("INSERT INTO runs (project, started_at, sources) VALUES (?,?,?)")
@@ -530,9 +534,9 @@ function workspaceWithFindings(
       );
     handle
       .query(
-        "INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent, welcome, reach, opportunity, disqualified, reason, score, created_at) VALUES (?,'m','fp',3,3,3,3,'thread',0,'reason',?,0)",
+        "INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent, welcome, reach, opportunity, disqualified, reason, created_at) VALUES (?,'m','fp',?,3,3,3,'thread',0,'reason',0)",
       )
-      .run(id, score);
+      .run(id, relevance);
     if (status !== null)
       handle.query("INSERT INTO triage (finding_id, status) VALUES (?,?)").run(id, status);
   });
@@ -570,21 +574,221 @@ describe("an empty list", () => {
   });
 });
 
+describe("a dismissal's category", () => {
+  test("is stored, named with its first fix, and shown by list and show", async () => {
+    const root = workspaceWithFindings(["p", 3, "new"]);
+    const triage = await run(root, "triage", "1", "dismissed", "--category", "vocabulary-only");
+    expect(triage.code).toBe(0);
+    expect(triage.output).toContain("#1 new → dismissed (vocabulary-only)");
+    expect(triage.output).toContain("First fix: `notFor`, then queries.");
+    expect((await run(root, "show", "1")).output).toContain("status: dismissed (vocabulary-only)");
+    expect((await run(root, "list", "--status", "dismissed")).output).toContain(
+      "dismissed: vocabulary-only",
+    );
+  });
+
+  /** A failure outside the table has no layer to point at. */
+  test("names no fix for a category that points at none", async () => {
+    const root = workspaceWithFindings(["p", 3, "new"]);
+    const { output } = await run(root, "triage", "1", "dismissed", "--category", "other");
+    expect(output).toContain("(other)");
+    expect(output).not.toContain("First fix");
+  });
+});
+
+/**
+ * The cohort the bar is judged on, read back as it was frozen: triaging the
+ * findings in it changes their status, never their place or their number.
+ */
+describe("barResult", () => {
+  const row = (
+    status: TriageStatus,
+    category: DismissalCategory | null = null,
+    hidden: boolean | null = null,
+    reassessed = false,
+  ) => ({ findingId: 0, status, category, hidden, reassessed });
+  const ten = (...head: ReturnType<typeof row>[]) => [
+    ...head,
+    ...Array.from({ length: 10 - head.length }, () => row("dismissed", "paid")),
+  ];
+
+  test("five hits with a clean top 3 meets the bar", () => {
+    const rows = ten(...Array.from({ length: 5 }, () => row("shortlisted")));
+    expect(barResult(rows)).toMatchObject({ hits: 5, verdict: "met", top3Dismissed: [] });
+  });
+
+  test("acted counts as a hit, as a shortlist later posted", () => {
+    expect(barResult(ten(...Array.from({ length: 5 }, () => row("acted")))).hits).toBe(5);
+  });
+
+  /** A busy week must not read as bad ranking: skipping says Obserf was right. */
+  test("skipped counts as a hit, and is not a dismissal", () => {
+    const result = barResult(ten(...Array.from({ length: 5 }, () => row("skipped"))));
+    expect(result.hits).toBe(5);
+    expect(result.dismissed).toHaveLength(5);
+  });
+
+  test("names a top-3 dismissal instead of deciding it", () => {
+    const rows = ten(
+      row("dismissed", "vocabulary-only"),
+      ...Array.from({ length: 5 }, () => row("shortlisted")),
+    );
+    expect(barResult(rows)).toMatchObject({
+      verdict: "met on count; the top 3 needs judgment",
+      top3Dismissed: [{ findingId: 0, category: "vocabulary-only" }],
+    });
+  });
+
+  test("four is a miss", () => {
+    expect(barResult(ten(...Array.from({ length: 4 }, () => row("shortlisted")))).verdict).toBe(
+      "missed",
+    );
+  });
+
+  /** The caveat the record carries: how many were judged before the reason was seen. */
+  test("counts how the decided ones were first judged", () => {
+    const rows = [row("shortlisted", null, true), row("dismissed", "paid", false), row("new")];
+    expect(barResult(rows).firstDecided).toEqual({ hidden: 1, shown: 1, unrecorded: 0 });
+    expect(barResult([row("acted")]).firstDecided).toEqual({ hidden: 0, shown: 0, unrecorded: 1 });
+  });
+
+  /** A count over an unfinished review changes as it finishes. */
+  test("is inconclusive while any is unlabelled, gone, or the ten are short", () => {
+    expect(barResult(ten(row("new"))).verdict).toBe("inconclusive: 1 still new");
+    expect(barResult([null, ...ten().slice(1)]).verdict).toBe("inconclusive: 1 no longer stored");
+    expect(barResult(ten().slice(0, 9)).verdict).toBe("inconclusive: only 9 in the inbox");
+  });
+
+  /** A decision made after a newer verdict may answer that one, not the ranked one. */
+  test("is inconclusive when any of the ten was reassessed after the scan", () => {
+    const rows = ten(
+      row("shortlisted", null, true, true),
+      ...Array.from({ length: 5 }, () => row("acted")),
+    );
+    expect(barResult(rows).verdict).toBe("inconclusive: 1 reassessed since this scan");
+  });
+});
+
+describe("list --run", () => {
+  /** Findings 1 and 2 in `p`, and scan #3 (after their two runs) freezing `inbox`. */
+  function frozenRun(inbox: unknown, error: string | null = null): string {
+    const root = workspaceWithFindings(["p", 3, "dismissed"], ["p", 2, "new"]);
+    const handle = new Database(join(root, ".obserf", "obserf.db"));
+    handle
+      .query(
+        "INSERT INTO runs (project, started_at, finished_at, sources, inbox, error) VALUES ('p', 0, 86400, '[]', ?, ?)",
+      )
+      .run(JSON.stringify(inbox), error);
+    handle.close();
+    return root;
+  }
+
+  /** A frozen score beside a newer reason is a pairing that never existed. */
+  test("lists the verdict each was ranked on, and says when a newer one exists", async () => {
+    const root = frozenRun([{ findingId: 2, assessmentId: 2, score: 61 }]);
+    const handle = new Database(join(root, ".obserf", "obserf.db"));
+    handle.run(
+      "INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent, welcome, reach, opportunity, disqualified, reason, created_at) VALUES (2,'m','fp2',3,3,3,3,'question',0,'a newer reason',1)",
+    );
+    handle.close();
+    const { output } = await run(root, "list", "--run", "3");
+    expect(output).toContain("thread · new ·");
+    expect(output).not.toContain("a newer reason");
+    expect(output).toContain("reassessed since · obserf show 2 has the newer verdict");
+    expect(output).toContain("Verdicts: m 1 · rubric/brief fp 1");
+  });
+
+  test("keeps the frozen order and score, beside the status now", async () => {
+    const root = frozenRun([
+      { findingId: 2, assessmentId: 2, score: 61 },
+      { findingId: 1, assessmentId: 1, score: 55 },
+      { findingId: 9, assessmentId: 9, score: 12 },
+    ]);
+    const { code, output } = await run(root, "list", "--run", "3");
+    expect(code).toBe(0);
+    expect(output).toContain("Scan #3 · p · ");
+    expect(output).toContain("top 3 then");
+    expect(output.indexOf("#2")).toBeLessThan(output.indexOf("#1 "));
+    expect(output).toContain("61 ");
+    expect(output).toContain("thread · new · https://news.ycombinator.com/item?id=2");
+    expect(output).toContain("thread · dismissed · https://news.ycombinator.com/item?id=1");
+    expect(output).toContain("#9    no longer stored");
+    // The bar, over the same three, in lines meant to be pasted.
+    expect(output).toContain("Bar: 0 of 3 worth surfacing — inconclusive: only 3 in the inbox");
+    expect(output).toContain("Top 3: #1 dismissed (no category) — judge manually");
+    expect(output).toContain("Dismissed: no category 1");
+    // Seeded directly, so its first decision was never recorded.
+    expect(output).toContain("First decided: 0 with the reason hidden, 0 shown, 1 unrecorded");
+    expect(output).toContain("Verdicts: m 2 · rubric/brief fp 2");
+    // #2 is still new: the one gap the operator can close, named with the way to.
+    expect(output).toContain("Decide the 1 still new with `obserf triage <id> <status>`");
+    expect(output).toContain("then run `obserf list --run 3` again");
+  });
+
+  test("an empty cohort still reports the bar, as inconclusive", async () => {
+    const { code, output } = await run(frozenRun([]), "list", "--run", "3");
+    expect(code).toBe(0);
+    expect(output).toContain("No new finding scored above zero when it finished.");
+    expect(output).toContain("Bar: 0 of 0 worth surfacing — inconclusive: only 0 in the inbox");
+    expect(output).not.toContain("Verdicts:");
+  });
+
+  test.each([
+    [["--status", "new"], "drop --status"],
+    [["--min", "0"], "drop --min"],
+    [["--project", "q"], `Unknown project "q"`],
+  ])("refuses %p", async (flags, message) => {
+    const { code, output } = await run(frozenRun([]), "list", "--run", "3", ...flags);
+    expect(code).not.toBe(0);
+    expect(output).toContain(message);
+  });
+
+  test("refuses a project the scan was not of", async () => {
+    const root = frozenRun([]);
+    const handle = new Database(join(root, ".obserf", "obserf.db"));
+    handle.run("INSERT INTO runs (project, started_at, sources) VALUES ('q', 0, '[]')");
+    handle.close();
+    const { code, output } = await run(root, "list", "--run", "3", "--project", "q");
+    expect(code).not.toBe(0);
+    expect(output).toContain("Scan #3 was of p, not q.");
+  });
+
+  test("says why a scan has no frozen inbox", async () => {
+    const root = frozenRun(null, "boom");
+    const failed = await run(root, "list", "--run", "3");
+    expect(failed.code).not.toBe(0);
+    expect(failed.output).toContain("Scan #3 failed, so it froze no inbox: boom");
+    // The seeded runs #1 and #2 never finished.
+    expect((await run(root, "list", "--run", "1")).output).toContain("never finished");
+    expect((await run(root, "list", "--run", "7")).output).toContain("No scan #7.");
+  });
+});
+
 describe("list rows", () => {
   // `q`'s finding predates the triage row every finding now gets, and still
   // lists as the `new` it is shown as.
-  const listWorkspace = () => workspaceWithFindings(["p", 50, "new"], ["q", 40, null]);
+  const listWorkspace = () => workspaceWithFindings(["p", 3, "new"], ["q", 2, null]);
 
   test("names its project and drops a venue the URL already says", async () => {
     const { output } = await run(listWorkspace(), "list");
-    expect(output).toContain("p · thread · https://news.ycombinator.com/item?id=1");
-    expect(output).toContain("q · thread · https://news.ycombinator.com/item?id=2");
+    expect(output).toContain("p · ? · thread · https://news.ycombinator.com/item?id=1");
+    expect(output).toContain("q · ? · thread · https://news.ycombinator.com/item?id=2");
   });
 
   test("leaves the project to `--project` when one is given", async () => {
     const { output } = await run(listWorkspace(), "list", "--project", "p");
-    expect(output).toContain("     thread · https://news.ycombinator.com/item?id=1");
+    expect(output).toContain("     ? · thread · https://news.ycombinator.com/item?id=1");
     expect(output).not.toContain("item?id=2");
+  });
+
+  /** Read against labels, a mixed list is useless without them. */
+  test("names each row's status when it lists more than one", async () => {
+    const root = workspaceWithFindings(["p", 3, "shortlisted"], ["p", 2, "skipped"]);
+    const { output } = await run(root, "list", "--status", "shortlisted,skipped");
+    expect(output).toContain("thread · shortlisted · https://news.ycombinator.com/item?id=1");
+    expect(output).toContain("thread · skipped · https://news.ycombinator.com/item?id=2");
+    const one = await run(root, "list", "--status", "skipped");
+    expect(one.output).not.toContain("thread · skipped ·");
   });
 });
 
@@ -601,7 +805,7 @@ describe("what a command still accepts", () => {
   test("its own flags pass through", async () => {
     // `--status` twice: a list flag, so not refused as a repeat.
     const { code, output } = await run(
-      workspaceWithFindings(["p", 50, "dismissed"]),
+      workspaceWithFindings(["p", 3, "dismissed"]),
       "list",
       "--project",
       "p",
@@ -646,6 +850,8 @@ describe("input rejected before the database opens", () => {
   test.each([
     [["draft", "1", "--kind", "repyl"], `Unknown draft kind "repyl"`],
     [["show", "1e2"], `Expected a finding id like 12, not "1e2"`],
+    [["triage", "1", "dismissed", "--category", "spam"], `Unknown category "spam"`],
+    [["triage", "1", "shortlisted", "--category", "paid"], `--category describes a dismissal`],
   ])("%p", async (args, message) => {
     const root = workspace();
     const { code, output } = await run(root, ...args);

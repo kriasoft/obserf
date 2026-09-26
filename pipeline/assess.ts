@@ -193,7 +193,7 @@ export async function assess(
  * `opportunity`, so such a verdict outranks most real findings, and drafting
  * falls back to a comment for a moment the model could not name. Resolved here
  * rather than in `score.ts` because the stored row has to be coherent too —
- * `rescore` recomputes from these components, and the inbox reads them directly.
+ * every read scores from these components, and the inbox shows them directly.
  *
  * Corrected rather than rejected: the model contradicting itself is not a reason
  * to fail an operator's whole scan, and the correction can only remove a finding,

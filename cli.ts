@@ -25,10 +25,13 @@ import {
   databasePath,
   draftsFor,
   earlierAssessments,
+  assessmentsByIds,
   findingById,
   latestFindings,
+  type ListedFinding,
   prepareDatabase,
   recentRuns,
+  runById,
   setTriage,
   storedCounts,
   storedProjects,
@@ -37,19 +40,24 @@ import { backup, backups, restore } from "./db/backup";
 import type { Assessment, Draft, Finding } from "./db/schema";
 import { venueRuleFor, type ProjectProfile } from "./project";
 import {
+  DISMISSAL_CATEGORIES,
   DRAFT_KINDS,
   EVERGREEN,
+  FIRST_FIX,
   TRIAGE_STATUSES,
+  WORTH_SURFACING,
   defaultKindFor,
+  compactAge,
   draftContextNote,
+  type DismissalCategory,
   type OpportunityType,
   type SourceId,
   type TriageStatus,
 } from "./vocabulary";
 import { generateDraft } from "./pipeline/draft";
-import { rescore } from "./pipeline/rescore";
 import { hostOf } from "./url";
 import { scan } from "./pipeline/scan";
+import { rank, scoreNow } from "./pipeline/score";
 import type { Usage } from "./agent";
 
 const HELP = `obserf — find free marketing opportunities for your projects
@@ -64,10 +72,14 @@ Usage: obserf <command> [options]
 
   list      Show ranked opportunities
               --project <key>   Filter by project
-              --status <s>      new | shortlisted | dismissed | acted (default: new)
+              --status <s>      new | shortlisted | skipped | dismissed | acted
+                                (default: new)
                                 comma-separated or repeated
               --min <score>     Minimum score (default: 1)
               --limit <n>       Default 20
+              --run <n>         The top 10 as scan n left them, in that order,
+                                with their status now, then the bar result;
+                                replaces the three above
 
   show <id>     Full detail for one finding, with its drafts
   draft <id>    Write a draft for a finding
@@ -75,8 +87,12 @@ Usage: obserf <command> [options]
                   (default: from the opportunity type, and a reply
                    where the finding is one comment in a thread)
   triage <id> <status> [--note "..."]
-  rescore       Recompute scores from stored components; no model calls
-                  --project <key>   Restrict to one project
+                  skipped: worth surfacing, not pursuing it
+                  dismissed: Obserf should not have surfaced it
+                  --category <c>    Why it was dismissed (dismissed only):
+                                    cannot-solve, vocabulary-only,
+                                    no-participation, venue-forbids, paid,
+                                    concluded, no-audience, other
   runs          Recent scans: what ran, what the gate dropped, what it spent
                   --project <key>   Filter by project
                   --limit <n>       Default 10
@@ -106,11 +122,10 @@ BRAVE_API_KEY and REDDIT_CLIENT_ID/SECRET from .env; both are optional.`;
  */
 const ACCEPTS = new Map<string, { flags: readonly string[]; args: number }>([
   ["scan", { flags: ["project", "source", "dry-run"], args: 0 }],
-  ["list", { flags: ["project", "status", "min", "limit"], args: 0 }],
+  ["list", { flags: ["project", "status", "min", "limit", "run"], args: 0 }],
   ["show", { flags: [], args: 1 }],
   ["draft", { flags: ["kind"], args: 1 }],
-  ["triage", { flags: ["note"], args: 2 }],
-  ["rescore", { flags: ["project"], args: 0 }],
+  ["triage", { flags: ["note", "category"], args: 2 }],
   ["runs", { flags: ["project", "limit"], args: 0 }],
   ["projects", { flags: [], args: 0 }],
   ["init", { flags: [], args: 1 }],
@@ -185,6 +200,14 @@ export function listArg(name: string, values: string[] | undefined): string[] | 
   // Given and empty is not the same as absent: `--status ,` asked for something.
   if (!items.length) throw new Error(`--${name} was given no value.`);
   return items;
+}
+
+function dismissalCategory(raw: string): DismissalCategory {
+  const category = DISMISSAL_CATEGORIES.find((value) => value === raw);
+  if (!category) {
+    throw new Error(`Unknown category "${raw}". Use: ${DISMISSAL_CATEGORIES.join(", ")}`);
+  }
+  return category;
 }
 
 function triageStatus(raw: string): TriageStatus {
@@ -341,6 +364,7 @@ const onStderr = styler(process.stderr);
 const dim = (s: string) => onStdout("2", s);
 const bold = (s: string) => onStdout("1", s);
 const red = (s: string) => onStdout("31", s);
+const cyan = (s: string) => onStdout("36", s);
 /** Red where the top-level handler writes, which is not where everything else does. */
 const stderrRed = (s: string) => onStderr("31", s);
 
@@ -378,8 +402,10 @@ async function main(): Promise<void> {
       status: { type: "string", multiple: true },
       kind: { type: "string" },
       note: { type: "string" },
+      category: { type: "string" },
       min: { type: "string" },
       limit: { type: "string" },
+      run: { type: "string" },
       port: { type: "string" },
       "dry-run": { type: "boolean" },
     },
@@ -397,12 +423,7 @@ async function main(): Promise<void> {
     case "draft":
       return runDraft(positionals[0], values.kind);
     case "triage":
-      return runTriage(positionals[0], positionals[1], values.note);
-    case "rescore": {
-      const count = rescore(await resolveProjectFilter(values.project));
-      console.log(`Rescored ${count} assessment${count === 1 ? "" : "s"}.`);
-      return;
-    }
+      return runTriage(positionals[0], positionals[1], values.note, values.category);
     case "runs":
       return runRuns(values);
     case "init":
@@ -557,6 +578,11 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
       );
     }
     if (!result.scored.length) console.log(dim("  nothing scored above zero"));
+    // What this scan assessed is not the inbox it left: that includes earlier
+    // findings, and is the ten the bar is counted on.
+    if (result.runId !== null) {
+      console.log(dim(`  inbox top 10 frozen: obserf list --run ${result.runId}`));
+    }
   }
 }
 
@@ -599,14 +625,16 @@ async function runList(values: {
   status?: string[];
   min?: string;
   limit?: string;
+  run?: string;
 }) {
+  if (values.run !== undefined) return runListFrozen(values.run, values);
   const status = (listArg("status", values.status) ?? ["new"]).map(triageStatus);
 
   // Before the project lookup, which may open the database.
   const minScore = intArg("min", values.min, 1, 0);
   const limit = intArg("limit", values.limit, 20);
   const project = await resolveProjectFilter(values.project);
-  const rows = latestFindings({ project, status, minScore, limit });
+  const rows = rank(latestFindings({ project, status }), { minScore, limit });
 
   if (!rows.length) {
     // Filtered findings, runs without findings, and no recorded history want
@@ -627,27 +655,253 @@ async function runList(values: {
     return;
   }
 
-  for (const { finding, assessment, note, drafts } of rows) {
-    console.log(
-      `${scoreColor(assessment?.score ?? 0)} ${dim(`#${String(finding.id).padEnd(4)}`)} ` +
-        `${bold(clipped(finding.title, 70))}`,
-    );
-    // `--project` already names the scope; otherwise keep each row self-identifying.
-    const meta = [
-      project ? "" : finding.project,
-      venueUnlessRedundant(finding.venue, finding.url),
-      assessment?.opportunity ?? "?",
-      drafts ? `${drafts} draft${drafts === 1 ? "" : "s"}` : "",
-      finding.url,
-    ].filter(Boolean);
-    console.log(`     ${dim(meta.join(" · "))}`);
-    if (assessment?.reason) console.log(dim(wrapped(assessment.reason, "     ")));
-    // Last and labelled: the model's reason and the operator's own conclusion
-    // about it are different claims, and a shortlist is unreadable if they blur.
-    // Indented to the width of the label, so the operator's own words stay in one
-    // column. Undimmed, unlike everything around it: theirs, not the model's.
-    if (note) console.log(`     ${dim("note:")} ${wrapped(note, " ".repeat(11)).trimStart()}`);
+  // A list of one status says it in the command; a mixed one has to say it per
+  // row, or reading it against labels (evaluation.md) needs a `show` per finding.
+  const showStatus = status.length > 1;
+  for (const row of rows) printListed(row, row.score, { showProject: !project, showStatus });
+}
+
+/**
+ * A scan's frozen inbox: the cohort the bar is judged on, in the order and with
+ * the scores it had when the scan finished, beside each finding's status now.
+ * Unlike the live list it cannot shrink or reorder while it is being triaged,
+ * which is what makes "5 of the top 10" countable. See docs/product/evaluation.md.
+ */
+async function runListFrozen(
+  runArg: string,
+  values: { project?: string; status?: string[]; min?: string; limit?: string },
+) {
+  // Before the database opens. Any filter would change which findings the cohort is.
+  const filters = [
+    values.status ? "--status" : "",
+    values.min !== undefined ? "--min" : "",
+    values.limit !== undefined ? "--limit" : "",
+  ].filter(Boolean);
+  if (filters.length) {
+    throw new Error(`--run lists the inbox as that scan left it; drop ${filters.join(", ")}.`);
   }
+  const runId = intArg("run", runArg, 0);
+  const project = await resolveProjectFilter(values.project);
+
+  const run = runById(runId);
+  if (!run) throw new Error(`No scan #${runId}. See \`obserf runs\`.`);
+  // `--run` names the project already; a different one is a mistake, not a filter.
+  if (project && project !== run.project) {
+    throw new Error(`Scan #${runId} was of ${run.project}, not ${project}.`);
+  }
+  const finished = run.finishedAt;
+  if (!run.inbox || !finished) {
+    throw new Error(
+      !finished
+        ? `Scan #${runId} never finished, so it froze no inbox.`
+        : run.error
+          ? `Scan #${runId} failed, so it froze no inbox: ${run.error}`
+          : `Scan #${runId} predates frozen inboxes.`,
+    );
+  }
+
+  console.log(
+    dim(`Scan #${runId} · ${run.project} · ${day(finished)} · top ${run.inbox.length} then`),
+  );
+  if (!run.inbox.length) {
+    // Still followed by the bar: an empty cohort is a result, and an inconclusive one.
+    console.log(dim("No new finding scored above zero when it finished."));
+  }
+  const ids = run.inbox.map((entry) => entry.findingId);
+  const rows = new Map(
+    (ids.length ? latestFindings({ ids }) : []).map((row) => [row.finding.id, row]),
+  );
+  // The verdicts the ten were ranked on. A row pairs its frozen score with its
+  // frozen verdict, never with a newer one: that pairing never existed.
+  const verdicts = new Map(
+    assessmentsByIds(run.inbox.map((entry) => entry.assessmentId)).map((v) => [v.id, v]),
+  );
+  for (const { findingId, assessmentId, score } of run.inbox) {
+    const row = rows.get(findingId);
+    // Said rather than skipped: a gap in the ten is part of what gets counted.
+    if (!row) {
+      console.log(
+        `${scoreColor(score)} ${dim(`#${String(findingId).padEnd(4)} no longer stored`)}`,
+      );
+      continue;
+    }
+    const frozen = verdicts.get(assessmentId) ?? null;
+    printListed({ ...row, assessment: frozen }, score, { showProject: false, showStatus: true });
+    if (!frozen) {
+      console.log(`     ${dim("the verdict it was ranked on is no longer stored")}`);
+    } else if (row.assessment?.id !== assessmentId) {
+      console.log(
+        `     ${dim(`reassessed since · obserf show ${findingId} has the newer verdict`)}`,
+      );
+    }
+  }
+
+  // Plain lines, uncoloured: this block is what gets pasted into the commit that
+  // records the result — see "What to record" in docs/product/evaluation.md.
+  const bar = barResult(
+    run.inbox.map(({ findingId, assessmentId }) => {
+      const row = rows.get(findingId);
+      return row
+        ? {
+            findingId,
+            status: row.status,
+            category: row.dismissalCategory,
+            hidden: row.firstDecidedHidden,
+            reassessed: row.assessment?.id !== assessmentId,
+          }
+        : null;
+    }),
+  );
+  console.log("");
+  console.log(`Bar: ${bar.hits} of ${bar.total} worth surfacing — ${bar.verdict}`);
+  console.log(
+    `Top 3: ${
+      bar.top3Dismissed.length
+        ? `${bar.top3Dismissed.map((d) => `#${d.findingId} dismissed (${d.category ?? "no category"})`).join(", ")} — judge manually`
+        : "no dismissals"
+    }`,
+  );
+  const { hidden, shown, unrecorded } = bar.firstDecided;
+  if (hidden + shown + unrecorded) {
+    console.log(
+      `First decided: ${hidden} with the reason hidden, ${shown} shown` +
+        (unrecorded ? `, ${unrecorded} unrecorded` : ""),
+    );
+  }
+  if (bar.dismissed.length)
+    console.log(`Dismissed: ${tally(bar.dismissed.map((d) => d.category ?? "no category"))}`);
+  console.log(
+    `Scan #${runId} · ${run.project} · ${day(finished)} · ${describeSources(run.sources, run.skipped)}`,
+  );
+  const ranked = [...verdicts.values()];
+  if (ranked.length) {
+    console.log(
+      `Verdicts: ${tally(ranked.map((v) => v.model))} · rubric/brief ${tally(ranked.map((v) => v.promptFingerprint))}`,
+    );
+  }
+  // After the block, not in it: advice for now, not part of the record. Only for
+  // undecided findings — triage cannot repair a missing or reassessed cohort.
+  // The CLI, not the inbox: this list has just shown their reasons, and the
+  // inbox would record a decision made after that as hidden.
+  if (bar.pending) {
+    console.log(
+      dim(
+        `\nDecide the ${bar.pending} still new with \`obserf triage <id> <status>\`, ` +
+          `then run \`obserf list --run ${runId}\` again — before scanning ${run.project} again.`,
+      ),
+    );
+  }
+}
+
+type BarRow = {
+  findingId: number;
+  status: TriageStatus;
+  category: DismissalCategory | null;
+  /** Whether the first decision was made with the model's reason hidden; null if unrecorded. */
+  hidden: boolean | null;
+  /**
+   * The finding has a newer verdict than the one it was frozen with, so a
+   * decision made since may answer that verdict rather than the ranked one.
+   */
+  reassessed: boolean;
+} | null;
+
+/**
+ * The bar from docs/product/evaluation.md, over a frozen cohort in rank order:
+ * at least 5 of the top 10 worth surfacing (shortlisted, skipped or acted — see
+ * `WORTH_SURFACING`), and no embarrassing false
+ * positive in the top 3. Only the count is mechanical. Whether a dismissal in
+ * the top 3 was embarrassing is the operator's judgment, so it is named, never
+ * decided. `null` is a finding no longer stored, which can never be labelled.
+ */
+export function barResult(rows: BarRow[]) {
+  const labelled = rows.filter((row) => row !== null);
+  const hits = labelled.filter((row) => WORTH_SURFACING.has(row.status));
+  const dismissed = labelled.filter((row) => row.status === "dismissed");
+  const top3Dismissed = rows.slice(0, 3).filter((row) => row?.status === "dismissed");
+  const pending = labelled.filter((row) => row.status === "new").length;
+  const gone = rows.length - labelled.length;
+  const reassessed = labelled.filter((row) => row.reassessed).length;
+
+  // Inconclusive first: a count over an unfinished review would change as it
+  // finishes, and fewer than ten is not a pass (evaluation.md).
+  const verdict =
+    rows.length < 10
+      ? `inconclusive: only ${rows.length} in the inbox`
+      : pending || gone || reassessed
+        ? `inconclusive: ${[
+            pending ? `${pending} still new` : "",
+            gone ? `${gone} no longer stored` : "",
+            // Fails loudly rather than crediting this ranking with judgments that
+            // may have been made against a later verdict.
+            reassessed ? `${reassessed} reassessed since this scan` : "",
+          ]
+            .filter(Boolean)
+            .join(", ")}`
+        : hits.length < 5
+          ? "missed"
+          : top3Dismissed.length
+            ? "met on count; the top 3 needs judgment"
+            : "met";
+
+  const decided = labelled.filter((row) => row.status !== "new");
+  return {
+    hits: hits.length,
+    total: rows.length,
+    /** Findings still `new`: the one gap in the result the operator can close. */
+    pending,
+    verdict,
+    /** How the decided ones were first judged, for the record's bias caveat. */
+    firstDecided: {
+      hidden: decided.filter((row) => row.hidden === true).length,
+      shown: decided.filter((row) => row.hidden === false).length,
+      unrecorded: decided.filter((row) => row.hidden === null).length,
+    },
+    dismissed: dismissed.map((row) => ({ findingId: row.findingId, category: row.category })),
+    top3Dismissed: top3Dismissed.flatMap((row) =>
+      row ? [{ findingId: row.findingId, category: row.category }] : [],
+    ),
+  };
+}
+
+/** `a 3, b 1`, most frequent first. */
+function tally(values: string[]): string {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([value, n]) => `${value} ${n}`)
+    .join(", ");
+}
+
+function printListed(
+  { finding, assessment, note, status, dismissalCategory, drafts, latestScan }: ListedFinding,
+  score: number,
+  options: { showProject: boolean; showStatus: boolean },
+) {
+  // A frozen cohort is read against its own scan, not the latest one.
+  const mark = options.showStatus ? null : latestScan;
+  console.log(
+    `${scoreColor(score)} ${dim(`#${String(finding.id).padEnd(4)}`)} ` +
+      `${bold(clipped(finding.title, 70))}` +
+      (mark ? ` ${cyan(mark)}` : ""),
+  );
+  const meta = [
+    options.showProject ? finding.project : "",
+    compactAge(finding.publishedAt),
+    venueUnlessRedundant(finding.venue, finding.url),
+    assessment?.opportunity ?? "?",
+    drafts ? `${drafts} draft${drafts === 1 ? "" : "s"}` : "",
+    dismissalCategory ? `dismissed: ${dismissalCategory}` : options.showStatus ? status : "",
+    finding.url,
+  ].filter(Boolean);
+  console.log(`     ${dim(meta.join(" · "))}`);
+  if (assessment?.reason) console.log(dim(wrapped(assessment.reason, "     ")));
+  // Last and labelled: the model's reason and the operator's own conclusion
+  // about it are different claims, and a shortlist is unreadable if they blur.
+  // Indented to the width of the label, so the operator's own words stay in one
+  // column. Undimmed, unlike everything around it: theirs, not the model's.
+  if (note) console.log(`     ${dim("note:")} ${wrapped(note, " ".repeat(11)).trimStart()}`);
 }
 
 /**
@@ -709,6 +963,9 @@ async function runRuns(values: { project?: string; limit?: string }) {
     // Independent of `assessed`: a scan that failed partway still spent quota.
     const spent = run.inputTokens + run.cacheReadTokens + run.cacheWriteTokens + run.outputTokens;
     if (spent) console.log(`     ${dim(usageLine(run))}`);
+    if (run.inbox) {
+      console.log(`     ${dim(`top ${run.inbox.length} frozen · obserf list --run ${run.id}`)}`);
+    }
     if (run.error) console.log(`     ${red(run.error)}`);
   }
 }
@@ -762,7 +1019,7 @@ async function runShow(idArg: string | undefined) {
         venueUnlessRedundant(finding.venue, finding.url),
         finding.sourceId,
         describeAge(finding.publishedAt, assessment?.opportunity ?? null),
-        `status: ${status}`,
+        `status: ${status}${view.dismissalCategory ? ` (${view.dismissalCategory})` : ""}`,
       ]
         .filter(Boolean)
         .join(" · "),
@@ -833,15 +1090,16 @@ async function runShow(idArg: string | undefined) {
   }
 
   if (assessment) {
-    console.log(`\n${bold(`Score ${assessment.score}`)}  ${dim(components(assessment))}`);
+    console.log(`\n${bold(`Score ${scoreNow(view)}`)}  ${dim(components(assessment))}`);
     console.log(wrapped(`${assessment.opportunity ?? "?"} — ${assessment.reason}`, ""));
     if (assessment.disqualified) console.log(red("Disqualified by the model."));
     console.log(dim(provenance(assessment)));
 
-    // The fingerprints show whether the prompt changed between verdicts; the
-    // evidence each earlier one saw was not kept, so they cannot say why a verdict
-    // moved. No score: `rescore` rewrites historical scores with the current
-    // weights and clock.
+    // The fingerprints show whether the rubric or brief changed between verdicts,
+    // not the candidate's formatting, which they leave out. The evidence each
+    // earlier one saw was not kept, so they cannot say why a verdict moved. No
+    // score: none is stored, and one computed now would apply today's weights and
+    // clock to a snapshot that was not kept.
     const earlier = earlierAssessments(finding.id, assessment.id);
     if (earlier.length) {
       console.log(`\n${bold("Earlier assessments")} ${dim("(of snapshots not kept)")}`);
@@ -909,9 +1167,12 @@ function components(assessment: Assessment): string {
   return `relevance ${assessment.relevance} · intent ${assessment.intent} · welcome ${assessment.welcome} · reach ${assessment.reach}`;
 }
 
-/** Which model and which prompt produced a verdict, for judging a prompt change. */
+/**
+ * Which model and which rubric and brief produced a verdict. Labelled
+ * `rubric/brief`, not `prompt`: the fingerprint leaves out the candidate block.
+ */
 function provenance(assessment: Assessment): string {
-  return `assessed ${day(assessment.createdAt)} · ${assessment.model} · prompt ${assessment.promptFingerprint}`;
+  return `assessed ${day(assessment.createdAt)} · ${assessment.model} · rubric/brief ${assessment.promptFingerprint}`;
 }
 
 /** `Sep 09 2026`, the same shape `obserf runs` prints. */
@@ -975,21 +1236,34 @@ function venueReminder(finding: Finding, project: ProjectProfile | undefined): s
   return `${rule ? dim(shown) : shown}\n${dim("Then edit it and post it yourself. Obserf never posts.")}`;
 }
 
-function runTriage(idArg: string | undefined, statusArg: string | undefined, note?: string) {
+function runTriage(
+  idArg: string | undefined,
+  statusArg: string | undefined,
+  note?: string,
+  categoryArg?: string,
+) {
   // Before the lookup, which opens and upgrades the database.
   if (statusArg === undefined) {
     throw new Error(`Expected a status: \`obserf triage <id> ${TRIAGE_STATUSES.join("|")}\``);
   }
   const status = triageStatus(statusArg);
+  const category = categoryArg === undefined ? undefined : dismissalCategory(categoryArg);
+  if (category && status !== "dismissed") {
+    throw new Error(`--category describes a dismissal; the status is "${status}".`);
+  }
   const view = requireFinding(idArg);
-  const previous = setTriage(view.finding.id, status, note);
-  console.log(`#${view.finding.id} ${previous ?? "new"} → ${status}`);
+  const previous = setTriage(view.finding.id, { status, note, category });
+  console.log(
+    `#${view.finding.id} ${previous?.status ?? "new"} → ${status}${category ? ` (${category})` : ""}`,
+  );
+  // The point of naming a cause: the layer it names is where the next edit goes.
+  const fix = category && FIRST_FIX[category];
+  if (fix) console.log(dim(`First fix: ${fix}. See docs/product/evaluation.md.`));
 }
 
 /**
- * Current age for context, not the age used when the stored score was computed.
- * Rescoring refreshes decay without changing the assessment timestamp.
- * See docs/product/scoring.md; the inbox uses the same evergreen exemptions.
+ * The age the score beside it was decayed by. See docs/product/scoring.md; the
+ * inbox uses the same evergreen exemptions.
  */
 function describeAge(publishedAt: Date | null, opportunity: OpportunityType | null): string {
   if (!publishedAt) return "date unknown, not decayed";

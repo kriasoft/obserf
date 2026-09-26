@@ -8,12 +8,12 @@ The discovery, review, and drafting loop is implemented. The operator posts in t
 - [x] Four source adapters: Brave, Hacker News, Reddit, GitHub
 - [x] Deterministic gates: duplicate, settled, blocked, stale, thin, unchanged, ruled-out
 - [x] Model assessment with the four components and structured output
-- [x] `obserf scan`, `list`, `show`, `draft`, `triage`, `rescore`
+- [x] `obserf scan`, `list`, `show`, `draft`, `triage`
 - [x] Local review inbox (`obserf serve`)
 
 Implementation alone does not establish useful results. The definition of done remains one real posted comment that came out of the tool, for each project; that validation is not recorded here yet.
 
-**How to tell if it is working, before any outcome tracking exists.** Triage statuses are already labels: of the top ten results, how many survive human review? Aim for **at least 5 of the top 10 shortlisted**, and **no embarrassing false positive in the top 3**. That is measurable today from `triage` alone, needs no attribution or analytics, and is a far more useful target than modelling marketing ROI.
+**How to tell if it is working, before any outcome tracking exists.** Triage statuses are already labels: of the top ten results, how many survive human review? Aim for **at least 5 of the top 10 worth surfacing** (shortlisted, skipped or acted), and **no embarrassing false positive in the top 3**. That is measurable today from `triage` alone, needs no attribution or analytics, and is a far more useful target than modelling marketing ROI.
 
 ## Next — the parts v1 defers
 
