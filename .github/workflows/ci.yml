@@ -93,6 +93,26 @@ jobs:
           bun run obserf backup                # snapshot and restore round-trip
           bun run obserf restore
 
+      # A scan of the untouched scaffold is refused before a request goes out,
+      # which makes this the offline way to exercise profile loading and the
+      # guard from the installed package.
+      - name: A scan refuses the untouched example
+        run: |
+          set -eux
+          cd /tmp/workspace
+          # `if`, not `! cmd | tee`: a pipeline reports the last command's status,
+          # so the negation would pass on tee's success no matter what the scan did.
+          if ./node_modules/.bin/obserf scan --dry-run >/tmp/scan.log 2>&1; then
+            echo "::error::a scan of the untouched scaffold was not refused"
+            cat /tmp/scan.log
+            exit 1
+          fi
+          if ! grep -q "scaffold placeholder queries remain" /tmp/scan.log; then
+            echo "::error::the scan failed, but not on the scaffold guard"
+            cat /tmp/scan.log
+            exit 1
+          fi
+
       # `serve` is the only command that bundles, at request time. A file missing
       # from `files` leaves every other command passing and the server binding
       # while the page answers 500, so the page has to actually be fetched.

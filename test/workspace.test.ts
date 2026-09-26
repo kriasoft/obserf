@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initWorkspace } from "../init";
+import { initWorkspace, placeholderQueries } from "../init";
 import {
   MARKER,
   findWorkspaceRoot,
@@ -185,7 +185,10 @@ describe("initWorkspace", () => {
     mkdirSync(join(root, "node_modules", "@obserf"), { recursive: true });
     symlinkSync(join(import.meta.dir, ".."), join(root, "node_modules", "@obserf", "cli"));
     // The example profile is the format's documentation, so it has to be valid.
-    expect((await loadProjects(root)).map((p) => p.key)).toEqual(["example"]);
+    const scaffolded = await loadProjects(root);
+    expect(scaffolded.map((p) => p.key)).toEqual(["example"]);
+    // The drift guard: every query `init` writes must be one the scan guard finds.
+    expect(placeholderQueries(scaffolded[0]!.queries)).toHaveLength(5);
   });
 
   test("never overwrites, so it is safe to re-run", () => {
@@ -199,6 +202,71 @@ test("projectByKey names what is available", async () => {
   const projects = await loadProjects(workspace({ "a.ts": profile("acme") }));
   expect(projectByKey(projects, "acme").key).toBe("acme");
   expect(() => projectByKey(projects, "nope")).toThrow(/Unknown project "nope". Available: acme/);
+});
+
+describe("placeholderQueries", () => {
+  const queries = (overrides: Partial<ProjectProfile["queries"]> = {}) => ({
+    search: ["the problem, described the way someone having it would say it"],
+    brave: ["site:reddit.com the problem in someone else's words"],
+    subreddits: ["subreddit-without-the-r-prefix"],
+    github: ['"the problem" recommendation in:title is:issue state:open'],
+    githubRepos: ["awesome your-topic in:name,description"],
+    ...overrides,
+  });
+
+  /** The half-done case: the one a warning about the whole file would not catch. */
+  test("returns only the queries that still contain placeholders", () => {
+    expect(
+      placeholderQueries(
+        queries({
+          search: ["how do I review code without uploading it"],
+          brave: ["site:reddit.com self-hosted code review"],
+          github: ["local code review in:title is:issue"],
+          githubRepos: ["awesome code-review in:name,description"],
+        }),
+      ),
+    ).toEqual(["subreddit-without-the-r-prefix"]);
+  });
+
+  /** Adapters trim before sending, so padding would not change what goes out. */
+  test("sees a placeholder through surrounding whitespace", () => {
+    expect(
+      placeholderQueries(
+        queries({ search: ["  the problem, described the way someone having it would say it "] }),
+      ),
+    ).toContain("the problem, described the way someone having it would say it");
+  });
+
+  /** The natural half-edit: a topic appended to the instruction, or a capital. */
+  test("sees a placeholder inside a longer query, in any case", () => {
+    const found = placeholderQueries(
+      queries({
+        search: ["The problem, described the way someone having it would say it"],
+        brave: ["site:reddit.com the problem in someone else's words local code review"],
+      }),
+    );
+    expect(found).toContain("The problem, described the way someone having it would say it");
+    expect(found).toContain(
+      "site:reddit.com the problem in someone else's words local code review",
+    );
+  });
+
+  test("queries without scaffold placeholders are left alone", () => {
+    expect(
+      placeholderQueries({
+        search: ["a"],
+        brave: ["b"],
+        subreddits: ["golang"],
+        github: ["c"],
+        githubRepos: ["d"],
+      }),
+    ).toEqual([]);
+  });
+
+  /** Emptying or omitting an unused list is as valid as rewriting it. */
+  test("absent optional query lists are not placeholders", () => {
+    expect(placeholderQueries({ search: ["a"], subreddits: [], github: [] })).toEqual([]);
+  });
 });
 
 describe("venueRuleFor", () => {

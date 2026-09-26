@@ -63,7 +63,7 @@ web/
   index.html app.tsx Review inbox
 project.ts           The ProjectProfile contract, defineProject, venueRuleFor
 workspace.ts         Finding a workspace, its paths, loading its profiles
-init.ts              obserf init: the scaffold, and only files
+init.ts              obserf init: the scaffold, and the placeholders it leaves
 index.ts             Package entry: defineProject and defineConfig, and no more
 drizzle/             Generated migrations, committed and shipped
 test/                Pure-logic tests

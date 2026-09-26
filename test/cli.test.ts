@@ -125,3 +125,27 @@ describe("a stored draft, re-read", () => {
     expect(output).toContain("venueGuidance");
   });
 });
+
+describe("a scan with a scaffold placeholder", () => {
+  /** A scaffold dry run is refused and names the remaining placeholder. */
+  test("is refused, and names the queries still to replace", async () => {
+    const root = mkdtempSync(join(tmpdir(), "obserf-cli-"));
+    roots.push(root);
+    mkdirSync(join(root, "projects"), { recursive: true });
+    writeFileSync(join(root, "obserf.config.ts"), "export default {};");
+    writeFileSync(
+      join(root, "projects", "example.ts"),
+      `export default { key: "example", name: "Example", url: "https://e.com", pitch: "p",
+         solves: ["s"], notFor: ["n"], voice: "v",
+         queries: { search: ["the problem, described the way someone having it would say it"],
+           subreddits: [], github: [] } };`,
+    );
+
+    const { code, output } = await run(root, "scan", "--dry-run");
+    expect(code).toBe(1);
+    expect(output).toContain("the problem, described the way someone having it would say it");
+    expect(output).toContain(
+      "No selected project was scanned: scaffold placeholder queries remain.",
+    );
+  });
+});

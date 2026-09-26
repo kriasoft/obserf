@@ -8,7 +8,7 @@ import { basename, resolve } from "node:path";
 // The version that scaffolded a workspace is the one known to work with it.
 import { version } from "./package.json";
 import { parseArgs } from "node:util";
-import { initWorkspace } from "./init";
+import { initWorkspace, placeholderQueries } from "./init";
 import {
   MARKER,
   backupsDir,
@@ -192,12 +192,17 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
   const projects = await loadProjects();
   const targets = values.project ? [projectByKey(projects, values.project)] : projects;
   const dryRun = values["dry-run"] ?? false;
+
+  const ready = readyToScan(targets);
+  if (!ready.length) {
+    throw new Error("No selected project was scanned: scaffold placeholder queries remain.");
+  }
   // A dry run writes nothing and needs no database, reading any existing one
   // read-only. Every other path here stores findings, so it opens — and upgrades
   // — before spending the first model call rather than after.
   if (!dryRun) prepareDatabase();
 
-  for (const project of targets) {
+  for (const project of ready) {
     console.log(
       `\n${bold(project.name)} ${dim(`(${project.key})`)}${dryRun ? dim(" — dry run") : ""}`,
     );
@@ -291,6 +296,40 @@ async function runScan(values: { project?: string; source?: string[]; "dry-run"?
     }
     if (!result.scored.length) console.log(dim("  nothing scored above zero"));
   }
+}
+
+/**
+ * The projects worth searching for, reporting the ones that are not — see
+ * `placeholderQueries` for why a placeholder must not be sent.
+ *
+ * Checked before the database is opened and before the first request goes out,
+ * dry runs included: `init` points the operator there next, and discovery still
+ * spends source quota.
+ *
+ * Reported and skipped rather than fatal, so one forgotten `example.ts` does not
+ * stop a ready project; the scan fails only when nothing is left.
+ */
+function readyToScan(targets: ProjectProfile[]): ProjectProfile[] {
+  const ready: ProjectProfile[] = [];
+  for (const project of targets) {
+    const unfinished = placeholderQueries(project.queries);
+    if (!unfinished.length) {
+      ready.push(project);
+      continue;
+    }
+    console.log(`\n${bold(project.name)} ${dim(`(${project.key})`)}`);
+    console.log("\x1b[31m  Not scanned: these queries still contain scaffold placeholders.\x1b[0m");
+    for (const query of unfinished) console.log(dim(`    ${query}`));
+    // Emptying is as valid an answer as rewriting: a project with no Reddit
+    // audience should leave `subreddits` empty, not invent one to get past this.
+    console.log(
+      dim(
+        "  Under `queries`, replace each placeholder with a real value for this\n" +
+          "  project — or remove it where that kind of search is unused.",
+      ),
+    );
+  }
+  return ready;
 }
 
 function runList(values: { project?: string; status?: string; min?: string; limit?: string }) {
