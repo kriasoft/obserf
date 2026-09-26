@@ -30,6 +30,7 @@ import {
   prepareDatabase,
   recentRuns,
   setTriage,
+  storedCounts,
   storedProjects,
 } from "./db";
 import { backup, backups, restore } from "./db/backup";
@@ -607,7 +608,21 @@ async function runList(values: {
   const rows = latestFindings({ project, status, minScore, limit });
 
   if (!rows.length) {
-    console.log(dim("Nothing to show. Run `obserf scan` first."));
+    // Filtered findings, runs without findings, and no recorded history want
+    // different advice. A dry run deliberately leaves no run row. The follow-ups
+    // keep `--project`, so they stay within what the operator asked about.
+    const { findings, runs } = storedCounts(project);
+    const scope = project ? ` for ${project}` : "";
+    const projectFlag = project ? ` --project ${project}` : "";
+    console.log(
+      dim(
+        findings
+          ? `Nothing${scope} matches --status ${status.join(",")} --min ${minScore}.`
+          : runs
+            ? `No findings stored${scope}. See \`obserf runs${projectFlag}\` for scan history.`
+            : `No scans recorded${scope} yet. Run \`obserf scan${projectFlag}\`.`,
+      ),
+    );
     return;
   }
 
@@ -616,9 +631,15 @@ async function runList(values: {
       `${scoreColor(assessment?.score ?? 0)} ${dim(`#${String(finding.id).padEnd(4)}`)} ` +
         `${bold(clipped(finding.title, 70))}`,
     );
-    console.log(
-      `     ${dim(`${finding.venue} · ${assessment?.opportunity ?? "?"}${drafts ? ` · ${drafts} draft${drafts === 1 ? "" : "s"}` : ""} · ${finding.url}`)}`,
-    );
+    // `--project` already names the scope; otherwise keep each row self-identifying.
+    const meta = [
+      project ? "" : finding.project,
+      venueUnlessRedundant(finding.venue, finding.url),
+      assessment?.opportunity ?? "?",
+      drafts ? `${drafts} draft${drafts === 1 ? "" : "s"}` : "",
+      finding.url,
+    ].filter(Boolean);
+    console.log(`     ${dim(meta.join(" · "))}`);
     if (assessment?.reason) console.log(dim(wrapped(assessment.reason, "     ")));
     // Last and labelled: the model's reason and the operator's own conclusion
     // about it are different claims, and a shortlist is unreadable if they blur.

@@ -12,6 +12,7 @@ import {
   wrapped,
 } from "../cli";
 import { migrate } from "../db/migrate";
+import type { TriageStatus } from "../vocabulary";
 
 /**
  * The CLI run as a CLI, for the properties that are about the process rather
@@ -499,6 +500,92 @@ describe("a surplus argument", () => {
   });
 });
 
+/** A database seeded with one assessed HN finding per `[project, score, status]`. */
+function workspaceWithFindings(
+  ...rows: [project: string, score: number, status: TriageStatus | null][]
+): string {
+  const root = workspace();
+  mkdirSync(join(root, ".obserf"), { recursive: true });
+  const handle = new Database(join(root, ".obserf", "obserf.db"), { create: true });
+  migrate(handle);
+  rows.forEach(([project, score, status], i) => {
+    const id = i + 1;
+    handle
+      .query("INSERT INTO runs (project, started_at, sources) VALUES (?,?,?)")
+      .run(project, 0, JSON.stringify(["hn"]));
+    handle
+      .query(
+        "INSERT INTO findings (id, project, source_id, url, title, venue, discovered_at) VALUES (?,?,?,?,?,?,?)",
+      )
+      .run(
+        id,
+        project,
+        "hn",
+        `https://news.ycombinator.com/item?id=${id}`,
+        "T",
+        "news.ycombinator.com",
+        0,
+      );
+    handle
+      .query(
+        "INSERT INTO assessments (finding_id, model, prompt_fingerprint, relevance, intent, welcome, reach, opportunity, disqualified, reason, score, created_at) VALUES (?,'m','fp',3,3,3,3,'thread',0,'reason',?,0)",
+      )
+      .run(id, score);
+    if (status !== null)
+      handle.query("INSERT INTO triage (finding_id, status) VALUES (?,?)").run(id, status);
+  });
+  handle.close();
+  return root;
+}
+
+/**
+ * An empty list says what storage shows, judged within `--project`: another
+ * project's history says nothing about this one.
+ */
+describe("an empty list", () => {
+  test("names the filters when findings exist but none match", async () => {
+    const { code, output } = await run(workspaceWithFindings(["q", 0, "new"]), "list");
+    expect(code).toBe(0);
+    expect(output).toContain("Nothing matches --status new --min 1.");
+  });
+
+  test("points at scan history when runs exist but findings do not", async () => {
+    const root = workspaceWithFindings();
+    const handle = new Database(join(root, ".obserf", "obserf.db"));
+    handle.run("INSERT INTO runs (project, started_at, sources) VALUES ('q', 0, '[]')");
+    handle.close();
+    // `q` resolves from its run row alone, as a retired profile's history does.
+    const { output } = await run(root, "list", "--project", "q");
+    expect(output).toContain(
+      "No findings stored for q. See `obserf runs --project q` for scan history.",
+    );
+  });
+
+  test("does not borrow another project's history", async () => {
+    const root = workspaceWithFindings(["q", 0, "new"]);
+    const { output } = await run(root, "list", "--project", "p");
+    expect(output).toContain("No scans recorded for p yet. Run `obserf scan --project p`.");
+  });
+});
+
+describe("list rows", () => {
+  // `q`'s finding predates the triage row every finding now gets, and still
+  // lists as the `new` it is shown as.
+  const listWorkspace = () => workspaceWithFindings(["p", 50, "new"], ["q", 40, null]);
+
+  test("names its project and drops a venue the URL already says", async () => {
+    const { output } = await run(listWorkspace(), "list");
+    expect(output).toContain("p · thread · https://news.ycombinator.com/item?id=1");
+    expect(output).toContain("q · thread · https://news.ycombinator.com/item?id=2");
+  });
+
+  test("leaves the project to `--project` when one is given", async () => {
+    const { output } = await run(listWorkspace(), "list", "--project", "p");
+    expect(output).toContain("     thread · https://news.ycombinator.com/item?id=1");
+    expect(output).not.toContain("item?id=2");
+  });
+});
+
 /** Last-wins for a flag that is not a list: `--min 80 --min 1` listed everything. */
 describe("a repeated flag", () => {
   test("is refused rather than half-read", async () => {
@@ -512,7 +599,7 @@ describe("what a command still accepts", () => {
   test("its own flags pass through", async () => {
     // `--status` twice: a list flag, so not refused as a repeat.
     const { code, output } = await run(
-      workspace(),
+      workspaceWithFindings(["p", 50, "dismissed"]),
       "list",
       "--project",
       "p",
@@ -524,7 +611,7 @@ describe("what a command still accepts", () => {
       "acted",
     );
     expect(code).toBe(0);
-    expect(output).toContain("Nothing to show");
+    expect(output).toContain("Nothing for p matches --status new,acted --min 0.");
   });
 
   /** Help is what you run when you do not know the grammar. */

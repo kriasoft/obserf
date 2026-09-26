@@ -141,7 +141,11 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
 
   const filters = [
     project ? eq(schema.findings.project, project) : undefined,
-    status?.length ? inArray(schema.triage.status, status) : undefined,
+    // The same fallback the rows below report, or a finding shown as `new` would
+    // be excluded by `--status new`.
+    status?.length
+      ? inArray(sql<TriageStatus>`coalesce(${schema.triage.status}, 'new')`, status)
+      : undefined,
     minScore !== undefined ? gte(schema.assessments.score, minScore) : undefined,
   ].filter((f) => f !== undefined);
 
@@ -410,6 +414,24 @@ export function storedProjects(): string[] {
     db.select({ project: schema.runs.project }).from(schema.runs),
   ).all();
   return rows.map((row) => row.project).sort();
+}
+
+/**
+ * What the database holds for a project, or for all of them — for an empty list:
+ * no run rows, run rows but no findings, or findings excluded by filters.
+ */
+export function storedCounts(project?: string): { findings: number; runs: number } {
+  const findings = db
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.findings)
+    .where(project ? eq(schema.findings.project, project) : undefined)
+    .get();
+  const runs = db
+    .select({ n: sql<number>`count(*)` })
+    .from(schema.runs)
+    .where(project ? eq(schema.runs.project, project) : undefined)
+    .get();
+  return { findings: findings?.n ?? 0, runs: runs?.n ?? 0 };
 }
 
 export function draftsFor(findingId: number): schema.Draft[] {
