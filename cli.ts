@@ -689,7 +689,7 @@ async function runRuns(values: { project?: string; limit?: string }) {
     // Totals and tokens are written only when a scan is finalized, so on an open
     // row they are the insert's zeros, not a count of nothing: "0 candidates → 0
     // assessed" for work that did happen is the misreport this command exists to
-    // prevent.
+    // prevent. The inbox withholds the counts too.
     if (!run.finishedAt) {
       console.log(`     ${dim("never finished, so its counts and token usage were not recorded")}`);
     } else if (run.gated === null) {
