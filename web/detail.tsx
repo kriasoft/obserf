@@ -12,6 +12,7 @@ import {
   type OpportunityType,
   type TriageStatus,
 } from "../vocabulary";
+import type { ScoreExplanation } from "../pipeline/score";
 import { type FindingDetail, messageOf, requestJson, postJson } from "./api";
 import { isShortcut } from "./keyboard";
 import { ActionBar } from "./action-bar";
@@ -54,16 +55,15 @@ export interface TriageOptions {
 }
 
 /**
- * Why the score is zero when a hard rule made it so, in the order
- * `pipeline/score.ts` checks them. Worded as what the model judged, not as fact
- * about the venue: welcome 0 is its reading of the page, not a recorded rule.
+ * Why the score is zero when a hard rule made it so. Worded as what the model
+ * judged, not as fact about the venue: welcome 0 is its reading of the page, not
+ * a recorded rule.
  */
-function forcedZero(a: Assessment): string | null {
-  if (a.disqualified) return "The model disqualified it; the verdict says why.";
-  if (a.relevance === 0) return "Relevance is 0: not about the problem the project solves.";
-  if (a.welcome === 0) return "Welcome is 0: the model judged a mention unwelcome here.";
-  return null;
-}
+const ZEROED_BY: Record<NonNullable<ScoreExplanation["zeroedBy"]>, string> = {
+  disqualified: "The model disqualified it; the verdict says why.",
+  relevance: "Relevance is 0: not about the problem the project solves.",
+  welcome: "Welcome is 0: the model judged a mention unwelcome here.",
+};
 
 export function scoreClass(score: number): string {
   return score >= 70 ? "high" : score >= 40 ? "mid" : "low";
@@ -150,6 +150,7 @@ export function Detail({
     finding,
     assessment,
     score,
+    breakdown,
     drafts,
     earlier,
     status,
@@ -340,9 +341,9 @@ export function Detail({
               <span className="chip model">MODEL</span>
               verdict · {assessment.opportunity ?? "no shape"} · {assessment.model}
             </p>
-            {forcedZero(assessment) && (
+            {breakdown?.zeroedBy && (
               <p className="forced">
-                <b>Score forced to 0.</b> {forcedZero(assessment)}
+                <b>Score forced to 0.</b> {ZEROED_BY[breakdown.zeroedBy]}
               </p>
             )}
             <p className="verdict-text">{assessment.reason}</p>
@@ -390,6 +391,7 @@ export function Detail({
                   </span>
                 ))}
               </p>
+              {breakdown && <Working breakdown={breakdown} />}
             </>
           )}
           {/* The age is evidence, not judgment, so it stays while hidden. */}
@@ -485,6 +487,51 @@ export function Detail({
         onDraft={(kind) => void draft(kind)}
       />
     </>
+  );
+}
+
+/**
+ * The arithmetic behind the score, from the server's own computation — the
+ * weights live only in `pipeline/score.ts`, so the page shows them, never
+ * recomputes them.
+ */
+function Working({ breakdown }: { breakdown: ScoreExplanation }) {
+  const { zeroedBy, terms, weighted, freshness, score } = breakdown;
+  return (
+    <details className="working">
+      <summary>Why {score}?</summary>
+      {zeroedBy ? (
+        <p>
+          A hard zero. {ZEROED_BY[zeroedBy]} No weighting can outvote it, so the components above do
+          not count.
+        </p>
+      ) : (
+        <dl>
+          {terms.map((t) => (
+            <div key={t.component}>
+              <dt>{t.component}</dt>
+              <dd>
+                {t.value}/5 of {Math.round(t.weight * 100)} = {t.points.toFixed(1)}
+              </dd>
+            </div>
+          ))}
+          <div>
+            <dt>on a fresh thread</dt>
+            <dd>{weighted.toFixed(1)}</dd>
+          </div>
+          <div>
+            <dt>age factor</dt>
+            <dd>×{freshness.toFixed(2)}</dd>
+          </div>
+          <div>
+            <dt>score</dt>
+            <dd>
+              {weighted.toFixed(1)} × {freshness.toFixed(2)} ≈ {score}
+            </dd>
+          </div>
+        </dl>
+      )}
+    </details>
   );
 }
 

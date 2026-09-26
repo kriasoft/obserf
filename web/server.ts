@@ -27,7 +27,7 @@ import {
   type TriageStatus,
 } from "../vocabulary";
 import { DraftRefused, generateDraft } from "../pipeline/draft";
-import { rank, scoreNow } from "../pipeline/score";
+import { explain, rank } from "../pipeline/score";
 import index from "./index.html";
 
 function json(data: unknown, status = 200): Response {
@@ -294,9 +294,14 @@ export async function serve(port = 4000) {
         // it does not record which rule was used when a draft was written.
         const { projects, profileError } = await profiles();
         const project = projects.find((p) => p.key === view.finding.project);
+        // One computation for the number and its working, so they cannot disagree.
+        const breakdown = view.assessment
+          ? explain(view.assessment, view.finding.publishedAt)
+          : null;
         return json({
           ...view,
-          score: scoreNow(view),
+          score: breakdown?.score ?? 0,
+          breakdown,
           // Bounded by the current verdict's id, as `obserf show` is, so one a
           // scan writes after this read is never filed as earlier.
           earlier: view.assessment ? earlierAssessments(view.finding.id, view.assessment.id) : [],

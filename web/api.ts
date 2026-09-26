@@ -1,4 +1,5 @@
 import type { Assessment, Draft, Finding } from "../db/schema";
+import type { ScoreExplanation } from "../pipeline/score";
 import { type DismissalCategory, type LatestScanMark, type TriageStatus } from "../vocabulary";
 
 interface FindingView {
@@ -18,6 +19,8 @@ export type ListedFinding = FindingView & {
 
 export type FindingDetail = FindingView & {
   score: number;
+  /** How `score` was reached; null without an assessment. */
+  breakdown: ScoreExplanation | null;
   /** Older verdicts, newest first, of snapshots that were not kept. */
   earlier: Assessment[];
   drafts: Draft[];

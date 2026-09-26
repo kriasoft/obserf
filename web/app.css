@@ -820,3 +820,31 @@ code {
   border-color: var(--you-line);
   background: var(--you-bg);
 }
+
+/* The score's arithmetic, one line per step, collapsed until asked for. */
+.working summary {
+  width: fit-content;
+  cursor: pointer;
+}
+.working dl,
+.working p {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 12px;
+}
+.working dl div {
+  display: flex;
+  gap: 10px;
+}
+.working dt {
+  flex: 0 0 130px;
+}
+.working dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+}
