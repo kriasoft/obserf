@@ -4,8 +4,15 @@
  */
 
 import { loadProjectsIfAny } from "../workspace";
-import { venueRuleFor } from "../project";
-import { draftsFor, findingById, latestFindings, prepareDatabase, setTriage } from "../db";
+import { venueRuleFor, type ProjectProfile } from "../project";
+import {
+  draftsFor,
+  findingById,
+  latestFindings,
+  prepareDatabase,
+  setTriage,
+  storedProjects,
+} from "../db";
 import {
   DRAFT_KINDS,
   TRIAGE_STATUSES,
@@ -21,16 +28,41 @@ function json(data: unknown, status = 200): Response {
 }
 
 /**
- * Spellings of this machine that reach this server. `127.0.0.1` is what Bun
- * reports and what the log prints, but an operator who types `localhost` lands
- * on the same listener, and rejecting them would break every write with a
- * cross-origin error while the page itself loaded fine.
- *
- * A set of names rather than a comparison against the request's own `Host`: a
- * domain that resolves to loopback sends its own name in both headers, so
- * checking them against each other would accept it. Nobody can own these.
+ * Names of this machine that reach this server, which binds IPv4 only:
+ * `127.0.0.1`, which the log prints, and `localhost`, which an operator may
+ * type. A fixed set rather than a comparison with the request's own `Host`,
+ * since a rebound domain sends its own name in both headers.
  */
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const LOOPBACK = new Set(["127.0.0.1", "localhost"]);
+
+/**
+ * Whether the request names this machine in `Host`: the DNS-rebinding defense
+ * (SECURITY.md). A rebound page's `Host` still names the attacker's domain,
+ * and its GET reads carry no `Origin`, so `crossOrigin` alone cannot protect
+ * them. The whole authority is matched, so `localhost:junk` and
+ * `localhost@elsewhere` are refused rather than read as their prefix.
+ */
+export function addressedToThisMachine(req: Request): boolean {
+  const match = /^(127\.0\.0\.1|localhost)(?::(\d{1,5}))?$/i.exec(req.headers.get("Host") ?? "");
+  return match !== null && Number(match[2] ?? 0) <= 65535;
+}
+
+/**
+ * A route behind that check, in one place rather than inside each handler.
+ * Every `/api` route must go through it, reads as much as writes: reading the
+ * inbox is the first half of the attack. Nothing enforces that but review.
+ *
+ * The page stays unwrapped: Bun serves it from the route table rather than a
+ * handler, and obserf's own HTML and bundle carry nothing the attack is after.
+ */
+function local<R extends Request>(
+  handler: (req: R) => Response | Promise<Response>,
+): (req: R) => Response | Promise<Response> {
+  return (req) =>
+    addressedToThisMachine(req)
+      ? handler(req)
+      : json({ error: "This server answers only to localhost." }, 403);
+}
 
 function sameMachine(origin: string, server: URL): boolean {
   try {
@@ -59,6 +91,84 @@ async function jsonObject(req: Request): Promise<Record<string, unknown> | Respo
     return json({ error: "Body must be a JSON object" }, 400);
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * Decimal digits as a safe integer, or null. Checked by spelling before `Number`,
+ * which reads `""` as 0 and accepts `1e3` and `0x10`; safe because past 2^53 the
+ * parsed value is no longer the digits typed.
+ */
+function wholeNumber(raw: string): number | null {
+  const value = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The finding id in the path, or the 400 to answer instead. `Number("abc")` is
+ * NaN, and NaN used to reach a foreign key and come back as Bun's development
+ * error page, with the working directory and source lines.
+ */
+export function findingIdIn(params: { id: string }): number | Response {
+  const id = wholeNumber(params.id);
+  if (id === null || id < 1) {
+    return json({ error: `"${params.id}" is not a finding id` }, 400);
+  }
+  return id;
+}
+
+/**
+ * A query parameter that has to be a whole number, or the 400 to answer instead.
+ * `?min=abc` used to come back as an empty list, which reads as "nothing scored
+ * that high" rather than "that is not a number".
+ */
+export function intParam(url: URL, name: string, fallback: number, min: number): number | Response {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return fallback;
+  const value = wholeNumber(raw);
+  if (value === null || value < min) {
+    return json({ error: `${name} must be a whole number, ${min} or greater` }, 400);
+  }
+  return value;
+}
+
+/**
+ * A 400 for a query key this route does not read, or one given twice — or null.
+ * `get` takes the first of a repeated key and ignores an unknown one, so
+ * `?projec=x` would be answered as if no filter had been asked for: the CLI's
+ * `ACCEPTS` check, at the other front end.
+ */
+export function unexpectedParams(url: URL, allowed: readonly string[]): Response | null {
+  for (const key of new Set(url.searchParams.keys())) {
+    if (!allowed.includes(key)) return json({ error: `Unknown parameter "${key}"` }, 400);
+    if (url.searchParams.getAll(key).length > 1) {
+      return json({ error: `Parameter "${key}" was given more than once` }, 400);
+    }
+  }
+  return null;
+}
+
+/**
+ * The project a `?project=` parameter names, or the 400 to answer instead.
+ *
+ * Absent is no filter. Empty is refused: `latestFindings` tests the key for
+ * truthiness, so `?project=` would widen the answer to every project. Unknown is
+ * refused as a mistyped `--project` is, since a filter matching nothing reads as
+ * a quiet week. Known means a profile's key or one the database holds rows for,
+ * as in the CLI, so a retired profile stays readable.
+ */
+export function projectParam(
+  url: URL,
+  projects: Pick<ProjectProfile, "key">[],
+): string | undefined | Response {
+  const raw = url.searchParams.get("project");
+  if (raw === null) return undefined;
+  // Before the lookups, so a stray empty key in the database cannot pass it.
+  if (raw === "") return json({ error: 'Unknown project ""' }, 400);
+  if (projects.some((p) => p.key === raw)) return raw;
+  // Second, so a maintenance read need not fall through to the database for a
+  // key the workspace already answers.
+  if (storedProjects().includes(raw)) return raw;
+  return json({ error: `Unknown project "${raw}"` }, 400);
 }
 
 /**
@@ -94,27 +204,59 @@ export async function serve(port = 4000) {
     // Loopback only. Bun listens on every interface when hostname is omitted,
     // which would expose findings and model quota to the network.
     hostname: "127.0.0.1",
+    /**
+     * Measured on Bun 1.4.2: in development mode Bun refuses a foreign `Host` on
+     * the page, its assets and the HMR socket, and never on handler routes —
+     * which is why `local` wraps every API route itself. That page check is
+     * defense in depth, since the page carries no data; CI notices if it goes.
+     */
     development: { hmr: true, console: true },
+    /**
+     * Without this, an unhandled error is answered with Bun's development error
+     * page: working directory, absolute paths, source lines. Logged in full
+     * where the operator is; answered with a fixed sentence, since an arbitrary
+     * message can carry SQL or a path just as well.
+     */
+    error(cause) {
+      console.error(cause);
+      return json({ error: "Internal server error; see the terminal for details." }, 500);
+    },
     routes: {
       "/": index,
 
-      "/api/projects": () => json(projects.map((p) => ({ key: p.key, name: p.name, url: p.url }))),
+      "/api/projects": local(() =>
+        json(projects.map((p) => ({ key: p.key, name: p.name, url: p.url }))),
+      ),
 
-      "/api/findings": (req) => {
+      /**
+       * Every parameter checked, as the CLI checks them. The inbox's controls
+       * send only valid values; a hand-typed or bookmarked URL used to get a
+       * 200 with an empty list, indistinguishable from a quiet week.
+       */
+      "/api/findings": local((req) => {
         const url = new URL(req.url);
-        const status = url.searchParams.get("status");
-        return json(
-          latestFindings({
-            project: url.searchParams.get("project") ?? undefined,
-            status: status ? (status.split(",") as TriageStatus[]) : ["new"],
-            minScore: Number(url.searchParams.get("min") ?? 1),
-            limit: Number(url.searchParams.get("limit") ?? 100),
-          }),
-        );
-      },
+        const shape = unexpectedParams(url, ["status", "project", "min", "limit"]);
+        if (shape) return shape;
 
-      "/api/findings/:id": (req) => {
-        const view = findingById(Number(req.params.id));
+        const status = url.searchParams.get("status")?.split(",") ?? ["new"];
+        const unknown = status.find((s) => !TRIAGE_STATUSES.includes(s as TriageStatus));
+        if (unknown !== undefined) return json({ error: `Unknown status "${unknown}"` }, 400);
+
+        const project = projectParam(url, projects);
+        if (project instanceof Response) return project;
+
+        const minScore = intParam(url, "min", 1, 0);
+        if (minScore instanceof Response) return minScore;
+        const limit = intParam(url, "limit", 100, 1);
+        if (limit instanceof Response) return limit;
+
+        return json(latestFindings({ project, status: status as TriageStatus[], minScore, limit }));
+      }),
+
+      "/api/findings/:id": local((req) => {
+        const id = findingIdIn(req.params);
+        if (id instanceof Response) return id;
+        const view = findingById(id);
         if (!view) return json({ error: "Not found" }, 404);
         // Use the startup profile for both the reminder and new drafts. Module
         // imports are cached, so edited rules require a server restart.
@@ -129,12 +271,18 @@ export async function serve(port = 4000) {
           profileAvailable: project !== undefined,
           venueRule: project ? venueRuleFor(project, view.finding.venue) : null,
         });
-      },
+      }),
 
       "/api/findings/:id/triage": {
-        POST: async (req) => {
+        POST: local(async (req) => {
           const blocked = crossOrigin(req, server);
           if (blocked) return blocked;
+
+          const id = findingIdIn(req.params);
+          if (id instanceof Response) return id;
+          // Checked rather than left to the foreign key, which answered a
+          // missing finding with a 500 and a page of source.
+          if (!findingById(id)) return json({ error: "Not found" }, 404);
 
           const body = await jsonObject(req);
           if (body instanceof Response) return body;
@@ -150,17 +298,19 @@ export async function serve(port = 4000) {
           // The status this replaced, so the inbox can offer to undo a keystroke
           // it cannot otherwise take back. Read here rather than from the row the
           // browser was rendering, which a queued write may already have changed.
-          const previous = setTriage(Number(req.params.id), body.status as TriageStatus, note);
+          const previous = setTriage(id, body.status as TriageStatus, note);
           return json({ ok: true, previous: previous ?? null });
-        },
+        }),
       },
 
       "/api/findings/:id/draft": {
-        POST: async (req) => {
+        POST: local(async (req) => {
           const blocked = crossOrigin(req, server);
           if (blocked) return blocked;
 
-          const view = findingById(Number(req.params.id));
+          const id = findingIdIn(req.params);
+          if (id instanceof Response) return id;
+          const view = findingById(id);
           if (!view) return json({ error: "Not found" }, 404);
 
           // Not silently read as "no kind given": that would pick a default and
@@ -209,7 +359,7 @@ export async function serve(port = 4000) {
             // empty draft look identical otherwise.
             return json({ error: error instanceof Error ? error.message : String(error) }, 502);
           }
-        },
+        }),
       },
     },
   });

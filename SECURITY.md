@@ -11,7 +11,7 @@ Obserf runs on one person's machine, holds their credentials, and feeds text fro
 - **A way to make Obserf post, write to a venue, or take any action outside the local machine.** It has no such code path by design ([ADR-005](docs/adr/005-obserf-drafts-humans-post.md)). A way to create one is the most serious bug this project can have.
 - **A prompt injection that changes what Obserf does**, rather than only what it concludes. Candidate text is untrusted and goes into the prompt directly; the defense is that the model is given no tools at all, so a successful injection should be able to produce a wrong assessment or a bad draft and nothing more. Anything that escapes that is in scope.
 - **Exposure of a credential or of the operator's data** — the borrowed `gh` token, `BRAVE_API_KEY`, `REDDIT_CLIENT_*`, the database, or anything that leaks them into a prompt, a log, a snapshot, or the published package.
-- **Reaching the review inbox from outside the machine.** It is unauthenticated and bound to `127.0.0.1`; a way around that, including DNS rebinding, is in scope.
+- **Reaching the review inbox from outside the machine.** It is unauthenticated and bound to `127.0.0.1`. Every API route refuses a request whose `Host` is not a loopback name, which is what stops DNS rebinding: a domain re-resolved to `127.0.0.1` still sends its own name in `Host`, and its GET requests carry no `Origin`, so the cross-origin check on writes cannot protect the read API. A way around either, or any other route out of the machine, is in scope.
 
 ## What is not
 

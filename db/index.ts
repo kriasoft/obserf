@@ -10,6 +10,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
+import { union } from "drizzle-orm/sqlite-core";
 import * as schema from "./schema";
 import type { TriageStatus } from "../vocabulary";
 
@@ -326,6 +327,21 @@ function knownFindingsIn(
       },
     ]),
   );
+}
+
+/**
+ * Project keys the database holds rows for, sorted.
+ *
+ * Retiring a profile keeps its findings, runs and triage (ADR-002), so a command
+ * reading stored rows answers to this list as well as to the profiles. Runs
+ * count too: a scan that found nothing still happened.
+ */
+export function storedProjects(): string[] {
+  const rows = union(
+    db.select({ project: schema.findings.project }).from(schema.findings),
+    db.select({ project: schema.runs.project }).from(schema.runs),
+  ).all();
+  return rows.map((row) => row.project).sort();
 }
 
 export function draftsFor(findingId: number): schema.Draft[] {
