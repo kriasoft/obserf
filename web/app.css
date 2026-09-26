@@ -87,12 +87,30 @@ body {
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
-.topbar label {
-  display: flex;
+/* A mode that stays on: a small box filled while pressed, beside its name. */
+.toggle {
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  cursor: pointer;
+  gap: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
   white-space: nowrap;
+}
+.toggle::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+.toggle[aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.toggle[aria-pressed="true"]::before {
+  background: currentColor;
 }
 .topbar .spacer {
   flex: 1;
@@ -116,7 +134,8 @@ body {
   background: var(--selected);
   color: var(--text);
 }
-.tabs .n {
+.tabs .n,
+.toggle .n {
   font:
     11px ui-monospace,
     monospace;

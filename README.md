@@ -136,7 +136,7 @@ Use `skipped` for a good finding you will not pursue, and `dismissed` for one Ob
 
 ### Review inbox
 
-`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. **hide reasons** keeps the model's score and reason off a new finding until you have judged it yourself. It is unauthenticated and bound to the local machine. It picks up an edited profile when you return to it; if the edit does not load, it keeps the last version that did and turns drafting off until you fix it. A module the config or a profile imports is not reloaded, so restart it after editing one of those.
+`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. **Hide judgment** keeps the model's score and reason off a new finding until you have judged it yourself. It is unauthenticated and bound to the local machine. It picks up an edited profile when you return to it; if the edit does not load, it keeps the last version that did and turns drafting off until you fix it. A module the config or a profile imports is not reloaded, so restart it after editing one of those.
 
 | Key | What it does |
 | --- | --- |
@@ -148,7 +148,7 @@ Use `skipped` for a good finding you will not pursue, and `dismissed` for one Ob
 | <kbd>u</kbd> | Undo the last status change in this tab |
 | <kbd>1</kbd>–<kbd>8</kbd> | Right after <kbd>d</kbd>: why it was dismissed, which names what to fix |
 | After <kbd>a</kbd> | A field asks where it was posted; <kbd>Enter</kbd> adds it to the note, <kbd>Esc</kbd> skips |
-| <kbd>r</kbd> | Reveal the model's judgment while **hide reasons** is on |
+| <kbd>r</kbd> | Reveal the model's judgment while **Hide judgment** is on |
 | <kbd>W</kbd> | Write the suggested draft (Shift+W; it uses model quota) |
 | <kbd>c</kbd> | Copy the newest draft |
 

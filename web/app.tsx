@@ -43,8 +43,11 @@ function App() {
    * is `status`, and never touches the score.
    */
   const [withZeros, setWithZeros] = useState(false);
-  /** Findings per status under the project and zeros in force; null while unknown. */
-  const [counts, setCounts] = useState<Record<TriageStatus, number> | null>(null);
+  /** Findings per status in the project, above zero and at zero; null while unknown. */
+  const [counts, setCounts] = useState<Record<
+    TriageStatus,
+    { scoring: number; zero: number }
+  > | null>(null);
   const [countsError, setCountsError] = useState<string | null>(null);
   /**
    * Reason-hidden review: a `new` finding's score, components, opportunity type
@@ -271,14 +274,13 @@ function App() {
   useEffect(() => {
     setCounts(null);
     setCountsError(null);
-  }, [project, withZeros]);
+  }, [project]);
 
   // Its own request, reloaded with the list so a triage moves a count at once.
   useEffect(() => {
-    const params = new URLSearchParams({ min: withZeros ? "0" : "1" });
-    if (project) params.set("project", project);
+    const params = project ? `?project=${encodeURIComponent(project)}` : "";
     const ticket = ++countsTicket.current;
-    requestJson<Record<TriageStatus, number>>(`/api/counts?${params}`)
+    requestJson<Record<TriageStatus, { scoring: number; zero: number }>>(`/api/counts${params}`)
       .then((next) => {
         if (ticket !== countsTicket.current) return;
         setCounts(next);
@@ -292,7 +294,8 @@ function App() {
         setCountsError(messageOf(cause));
       });
     // `status` too: opening a tab reloads the list, and its count must be as fresh.
-  }, [project, status, withZeros, revision]);
+    // Not `withZeros`: both counts arrive together, and the toggle picks between them.
+  }, [project, status, revision]);
 
   // Reloaded with the list, not only on a project change, so a scan that finished
   // meanwhile leaves no stale warning. A separate request: each is usable when
@@ -630,7 +633,8 @@ function App() {
         >
           {TRIAGE_STATUSES.map((s) => {
             const label = s[0]!.toUpperCase() + s.slice(1);
-            const n = counts?.[s];
+            const c = counts?.[s];
+            const n = c && (withZeros ? c.scoring + c.zero : c.scoring);
             return (
               <button
                 key={s}
@@ -658,30 +662,28 @@ function App() {
           requiredProjects={requiredScanProjects}
           showProject={!project}
         />
-        <label
-          className="muted"
+        {/* Buttons that stay pressed, not checkboxes: they change what the
+            whole inbox shows, and read as modes beside the tabs. */}
+        <button
+          type="button"
+          className="toggle"
+          aria-pressed={hideJudgment}
+          title="Hide the model's score, components, type and verdict on new findings until you triage them or press r"
+          onClick={() => setHideJudgment((on) => !on)}
+        >
+          Hide judgment
+        </button>
+        <button
+          type="button"
+          className="toggle"
+          aria-pressed={withZeros}
           title="Zero-scored findings, including everything the model disqualified"
+          onClick={() => setWithZeros((on) => !on)}
         >
-          <input
-            type="checkbox"
-            aria-label="Show zero-scored findings"
-            checked={withZeros}
-            onChange={(e) => setWithZeros(e.target.checked)}
-          />
-          zeros
-        </label>
-        <label
-          className="muted"
-          title="Hide the model's score, type and reason on new findings until you triage them or press r"
-        >
-          <input
-            type="checkbox"
-            aria-label="Hide the model's score and reason on new findings"
-            checked={hideJudgment}
-            onChange={(e) => setHideJudgment(e.target.checked)}
-          />
-          hide reasons
-        </label>
+          Zeros
+          {/* How many this tab holds at zero: what turning it on adds. */}
+          {counts && <span className="n">{counts[status].zero}</span>}
+        </button>
         <ThemeToggle />
         <button
           type="button"
