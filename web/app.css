@@ -279,3 +279,18 @@ h1 {
   max-height: 40vh;
   overflow: auto;
 }
+
+/* Stacked rather than one line: a scan can be late, short a source and failed
+   at once, and a warning wrapped mid-sentence goes unread. */
+.scan {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.scan-run {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}

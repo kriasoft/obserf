@@ -9,7 +9,9 @@ import {
   draftsFor,
   findingById,
   latestFindings,
+  latestRunPerProject,
   prepareDatabase,
+  recentRuns,
   setTriage,
   storedProjects,
 } from "../db";
@@ -150,11 +152,11 @@ export function unexpectedParams(url: URL, allowed: readonly string[]): Response
 /**
  * The project a `?project=` parameter names, or the 400 to answer instead.
  *
- * Absent is no filter. Empty is refused: `latestFindings` tests the key for
- * truthiness, so `?project=` would widen the answer to every project. Unknown is
- * refused as a mistyped `--project` is, since a filter matching nothing reads as
- * a quiet week. Known means a profile's key or one the database holds rows for,
- * as in the CLI, so a retired profile stays readable.
+ * Absent is no filter. Empty is refused: `latestFindings` and `recentRuns` test
+ * the key for truthiness, so `?project=` would widen the answer to every
+ * project. Unknown is refused as a mistyped `--project` is, since a filter
+ * matching nothing reads as a quiet week. Known means a profile's key or one the
+ * database holds rows for, as in the CLI, so a retired profile stays readable.
  */
 export function projectParam(
   url: URL,
@@ -227,6 +229,21 @@ export async function serve(port = 4000) {
       "/api/projects": local(() =>
         json(projects.map((p) => ({ key: p.key, name: p.name, url: p.url }))),
       ),
+
+      /**
+       * The latest scan: of the project when filtered, and of each project that
+       * has one when not, since the newest run across a mixed list establishes
+       * nothing about the rest. A project with no run is absent; the inbox, which
+       * knows which projects it shows, says so.
+       */
+      "/api/runs/latest": local((req) => {
+        const url = new URL(req.url);
+        const shape = unexpectedParams(url, ["project"]);
+        if (shape) return shape;
+        const project = projectParam(url, projects);
+        if (project instanceof Response) return project;
+        return json(project ? recentRuns({ project, limit: 1 }) : latestRunPerProject());
+      }),
 
       /**
        * Every parameter checked, as the CLI checks them. The inbox's controls

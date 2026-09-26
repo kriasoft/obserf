@@ -3,11 +3,11 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { db, knownFindingsForDryRun, schema, storedProjects } from "../db";
+import { db, knownFindingsForDryRun, latestRunPerProject, schema, storedProjects } from "../db";
 import { migrate } from "../db/migrate";
 
 /**
- * `storedProjects` is what lets `obserf list` and `rescore` reject a
+ * `storedProjects` is what lets `obserf list`, `runs` and `rescore` reject a
  * mistyped `--project` without also locking the operator out of the history of a
  * profile they have since retired. Pinned here: either table alone counts, a
  * project in both is named once, and the list is sorted.
@@ -44,6 +44,30 @@ test("names every project the database holds rows for, once", () => {
   expect(stored).toContain("stored-projects-finding-only");
   expect(stored.filter((key) => key === "stored-projects-both")).toHaveLength(1);
   expect(stored).toEqual([...stored].sort());
+});
+
+/**
+ * The query behind an unfiltered inbox: each stored project's newest scan,
+ * chosen by id, since a clock that moved backwards would otherwise pick an older
+ * one.
+ */
+test("latestRunPerProject keeps each project's newest run, by id", () => {
+  const insertRun = (project: string, startedAt: number) =>
+    db
+      .insert(schema.runs)
+      .values({ project, startedAt: new Date(startedAt), sources: ["github"] })
+      .returning()
+      .get().id;
+
+  const olderA = insertRun("latest-run-a", 2000);
+  const newerA = insertRun("latest-run-a", 1000);
+  const onlyB = insertRun("latest-run-b", 0);
+
+  const ours = latestRunPerProject()
+    .filter((run) => run.project.startsWith("latest-run-"))
+    .map((run) => run.id);
+  expect(ours).toEqual([onlyB, newerA]);
+  expect(ours).not.toContain(olderA);
 });
 
 /**

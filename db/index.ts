@@ -342,6 +342,24 @@ export function recentRuns(options: { project?: string; limit?: number } = {}): 
 }
 
 /**
+ * The most recent scan of each project, newest first. By id, as in `recentRuns`:
+ * timestamps can tie at a stored second, or go back.
+ */
+export function latestRunPerProject(): schema.Run[] {
+  const newest = db
+    .select({ id: sql<number>`max(${schema.runs.id})` })
+    .from(schema.runs)
+    .groupBy(schema.runs.project);
+
+  return db
+    .select()
+    .from(schema.runs)
+    .where(inArray(schema.runs.id, newest))
+    .orderBy(desc(schema.runs.id))
+    .all();
+}
+
+/**
  * Project keys the database holds rows for, sorted.
  *
  * Retiring a profile keeps its findings, runs and triage (ADR-002), so a command

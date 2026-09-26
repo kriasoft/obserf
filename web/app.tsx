@@ -1,6 +1,6 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Assessment, Draft, Finding } from "../db/schema";
+import type { Assessment, Draft, Finding, Run } from "../db/schema";
 import type { DraftResult } from "../pipeline/draft";
 import {
   DRAFT_KINDS,
@@ -109,7 +109,13 @@ const postJson = <T,>(path: string, payload: unknown): Promise<T> =>
   });
 
 function App() {
-  const [projects, setProjects] = useState<Array<{ key: string; name: string }>>([]);
+  /**
+   * Null until loaded, with its own error: scan status names each profile without
+   * a run, so an unread list must not pass for an empty one, nor its error be
+   * cleared by the next list load.
+   */
+  const [projects, setProjects] = useState<Array<{ key: string; name: string }> | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
   const [project, setProject] = useState("");
   const [status, setStatus] = useState<TriageStatus>("new");
   /**
@@ -119,6 +125,13 @@ function App() {
    */
   const [withZeros, setWithZeros] = useState(false);
   const [items, setItems] = useState<ListedFinding[] | null>(null);
+  /**
+   * The latest scan of each project in view; null until loaded, so no project
+   * reads as unscanned before the answer arrives. The error is separate: "no scan
+   * recorded" and "could not read the record" are different answers.
+   */
+  const [scans, setScans] = useState<Run[] | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   /**
    * The single reload trigger. Everything that changes stored state bumps it, so
@@ -143,6 +156,8 @@ function App() {
   // Filter changes fire overlapping requests; without this the slower earlier
   // one can land last and repopulate the list with the previous filter.
   const listTicket = useRef(0);
+  /** The same guard for the scan line, which follows the project filter too. */
+  const scanTicket = useRef(0);
   /** Where to land if the current selection leaves the filtered list. */
   const prefer = useRef<number[]>([]);
   const pane = useRef<HTMLDivElement>(null);
@@ -183,9 +198,22 @@ function App() {
   }, [selectedId]);
 
   useEffect(() => {
+    // StrictMode mounts twice; the discarded request must not overwrite the kept one.
+    let current = true;
     requestJson<Array<{ key: string; name: string }>>("/api/projects")
-      .then(setProjects)
-      .catch((cause: unknown) => setError(messageOf(cause)));
+      .then((loaded) => {
+        if (!current) return;
+        setProjects(loaded);
+        setProjectsError(null);
+      })
+      .catch((cause: unknown) => {
+        if (!current) return;
+        setProjects(null);
+        setProjectsError(messageOf(cause));
+      });
+    return () => {
+      current = false;
+    };
   }, []);
 
   /**
@@ -204,6 +232,16 @@ function App() {
     setItems(null);
     setSelectedId(null);
   }, [project, status, withZeros]);
+
+  /**
+   * The same for the scan line, on the project alone: status and zeros do not
+   * change which scan applies. Left on screen, it would describe another
+   * project's scan, and a filtered view drops the label that would betray it.
+   */
+  useEffect(() => {
+    setScans(null);
+    setScanError(null);
+  }, [project]);
 
   useEffect(() => {
     const params = new URLSearchParams({
@@ -233,6 +271,25 @@ function App() {
         if (ticket === listTicket.current) setError(messageOf(cause));
       }
     })();
+  }, [project, status, withZeros, revision]);
+
+  // Reloaded with the list, not only on a project change, so a scan that finished
+  // meanwhile leaves no stale warning. A separate request: each is usable when
+  // the other fails.
+  useEffect(() => {
+    const params = project ? `?project=${encodeURIComponent(project)}` : "";
+    const ticket = ++scanTicket.current;
+
+    requestJson<Run[]>(`/api/runs/latest${params}`)
+      .then((runs) => {
+        if (ticket !== scanTicket.current) return;
+        setScans(runs);
+        setScanError(null);
+      })
+      .catch((cause: unknown) => {
+        // Guarded too: a superseded failure must not overwrite a newer answer.
+        if (ticket === scanTicket.current) setScanError(messageOf(cause));
+      });
   }, [project, status, withZeros, revision]);
 
   // A scan runs in a terminal beside this window, so returning to the tab is the
@@ -364,13 +421,27 @@ function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [items, selectedId, select, triage, undoLast]);
 
+  // Every profile, and every project in the list: a retired one has rows but no
+  // profile, and either may have no run to show. Unknown until the profiles are,
+  // filtered or not, so the profile error's "not shown" holds.
+  const requiredScanProjects =
+    projects &&
+    (project
+      ? [project]
+      : [
+          ...new Set([
+            ...projects.map((p) => p.key),
+            ...(items ?? []).map((row) => row.finding.project),
+          ]),
+        ]);
+
   return (
     <div className="layout">
       <div className="list">
         <div className="toolbar">
           <select aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
             <option value="">All projects</option>
-            {projects.map((p) => (
+            {projects?.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.name}
               </option>
@@ -408,6 +479,13 @@ function App() {
           </span>
         </div>
 
+        <ScanStatus
+          runs={scans}
+          error={scanError}
+          requiredProjects={requiredScanProjects}
+          showProject={!project}
+        />
+
         {undo && (
           <div className="undo">
             <span className="muted small">
@@ -419,6 +497,11 @@ function App() {
           </div>
         )}
 
+        {projectsError && (
+          <p className="error pad">
+            Could not read the profiles, so scan status is not shown — {projectsError}
+          </p>
+        )}
         {error && <p className="error pad">{error}</p>}
 
         {items?.map(({ finding, assessment, note, drafts }) => (
@@ -455,13 +538,6 @@ function App() {
           <p className="muted pad">
             No {status} findings{project ? " for this project" : ""}
             {withZeros ? "" : " scoring above zero"}.
-            {/* Only `new` arrives from a scan; the rest are decisions. */}
-            {status === "new" && (
-              <>
-                {" "}
-                Run <code>obserf scan</code>.
-              </>
-            )}
           </p>
         )}
       </div>
@@ -762,6 +838,106 @@ function Detail({
       ))}
     </>
   );
+}
+
+/**
+ * The latest scan of each project in view, and whether it saw everything it was
+ * asked to: one that skipped sources, died halfway or failed otherwise yields an
+ * inbox indistinguishable from a complete one with less in it.
+ */
+function ScanStatus({
+  runs,
+  error,
+  requiredProjects,
+  showProject,
+}: {
+  runs: Run[] | null;
+  error: string | null;
+  /** Projects whose missing run is said rather than left out; null while unknown. */
+  requiredProjects: string[] | null;
+  /** Name each scan's project, when the list is not filtered to one. */
+  showProject: boolean;
+}) {
+  // Said rather than swallowed: the completeness warnings below are the reason
+  // this exists, so their absence must not be readable as "all clear".
+  if (error) {
+    return <div className="scan warn small">Could not read the scan record — {error}</div>;
+  }
+  if (!runs || !requiredProjects) return null;
+  // Only projects in view: a retired one outside the list is no more reported
+  // for having a run than for lacking one.
+  const shown = runs.filter((run) => requiredProjects.includes(run.project));
+  const unscanned = requiredProjects.filter((key) => !shown.some((run) => run.project === key));
+  if (!shown.length && !unscanned.length) return null;
+
+  return (
+    <div className="scan small">
+      {unscanned.map((key) => (
+        <span className="warn" key={key}>
+          {showProject && `${key} · `}no scan recorded
+        </span>
+      ))}
+      {shown.map((run) => {
+        // Still running, or the process died. Totals are written when a scan
+        // finishes, so an open row's are the insert's zeros, not a count.
+        const open = run.finishedAt === null;
+        // Finalized by a discovery failure: the candidates are real, but an arrow
+        // to "0 assessed" would say they went through a gate that never ran.
+        const counts = open
+          ? ""
+          : run.gated === null
+            ? ` · ${run.candidates} candidates · the gate did not run`
+            : ` · ${run.candidates} candidates → ${run.assessed} assessed`;
+        // Named on every run, as `obserf runs` does: a `--source` scan that
+        // succeeded is otherwise indistinguishable from one of every source.
+        const { skipped } = run;
+        const ran = skipped && run.sources.filter((id) => !(id in skipped));
+        return (
+          <div className="scan-run" key={run.id}>
+            <span className="muted">
+              {showProject && `${run.project} · `}
+              {open ? "scan started" : "last scan"} {ago(new Date(run.startedAt))}
+              {ran && (ran.length ? ` · ran ${ran.join(", ")}` : " · nothing ran")}
+              {counts}
+            </span>
+            {/* `!== null`: `new Error("")` is stored as an empty message. */}
+            {run.error !== null && (
+              <span className="error">scan failed{run.error && `: ${run.error}`}</span>
+            )}
+            {open && (
+              <span className="warn">
+                this scan is unfinished — still running, or stopped — so the list may be short
+              </span>
+            )}
+            {Object.entries(run.skipped ?? {}).map(([source, reason]) => (
+              <span className="warn" key={source}>
+                {source} did not run: {reason}
+              </span>
+            ))}
+            {/* Null is not `{}`: a row written before discovery finished never
+                recorded which sources ran. */}
+            {run.skipped === null && (
+              <span className="muted">
+                selected {run.sources.join(", ")}; which of them ran was not recorded
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Coarse on purpose: the question is "is this list stale", not how stale.
+ * Floored, so a scan is never made to sound older than it is.
+ */
+function ago(date: Date): string {
+  const minutes = Math.floor((Date.now() - date.getTime()) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 
 /**
