@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { StrictMode, useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Assessment, Draft, Finding, Run } from "../db/schema";
 import {
@@ -78,6 +78,17 @@ const STATUS_MEANING: Record<TriageStatus, string> = {
 const KEY_FOR: Partial<Record<TriageStatus, string>> = Object.fromEntries(
   Object.entries(TRIAGE_KEYS).map(([key, status]) => [status, key]),
 );
+
+/**
+ * The four decisions on the action bar, each with the few words that tell it
+ * apart from its neighbour; the button's title carries `STATUS_MEANING`.
+ */
+const DECISIONS: ReadonlyArray<[status: TriageStatus, label: string, caption: string]> = [
+  ["shortlisted", "Shortlist", "act on later"],
+  ["skipped", "Skip", "good find · not pursuing"],
+  ["dismissed", "Dismiss", "shouldn't have surfaced"],
+  ["acted", "Acted", "you posted it"],
+];
 
 /**
  * The key map shown by `?`, grouped by what the operator is doing. The one place
@@ -174,8 +185,9 @@ function applyTheme(theme: Theme) {
  */
 function isShortcut(event: KeyboardEvent): boolean {
   if (event.metaKey || event.ctrlKey || event.altKey) return false;
-  // A modal dialog owns the keyboard; the page behind it is inert.
-  if (document.querySelector("dialog:modal")) return false;
+  // A modal dialog owns the keyboard. An open menu does too, even though it is
+  // not modal: a key meant for it must not triage or move the selection.
+  if (document.querySelector("dialog:modal, :popover-open")) return false;
   const target = event.target as HTMLElement | null;
   return !target?.closest("input, textarea, select, a, button:not(.item)");
 }
@@ -1205,197 +1217,311 @@ function Detail({
 
   return (
     <>
-      <h1>{finding.title}</h1>
-      <p className="muted">
-        <a href={finding.url} target="_blank" rel="noreferrer">
-          {finding.url}
-        </a>
-        <br />
-        {finding.project} · {finding.venue} · {finding.sourceId} ·{" "}
-        {finding.publishedAt ? new Date(finding.publishedAt).toDateString() : "date unknown"} ·{" "}
-        {status}
-        {dismissalCategory && ` (${dismissalCategory})`}
-        {/* What the model is told beyond the text; bears on `reach` and `welcome`. */}
-        {(finding.isThreadComment || finding.author) && (
-          <>
-            <br />
-            {[
-              finding.isThreadComment ? "one comment inside a thread, not the thread itself" : "",
-              finding.author ? `author: ${finding.author}` : "",
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </>
-        )}
-      </p>
-
-      {finding.repository && <Repository facts={finding.repository} />}
-      {finding.metrics && <Engagement metrics={finding.metrics} />}
-
-      {assessment && hidden ? (
-        <>
-          {/* The age is evidence, not judgment, so it stays. */}
-          <div className="components">
-            <Age publishedAt={finding.publishedAt} opportunity={null} />
-          </div>
-          <p className="muted">
-            The model's judgment is hidden until you triage this.{" "}
-            <button onClick={onReveal}>
-              reveal <kbd>r</kbd>
-            </button>
-          </p>
-        </>
-      ) : assessment ? (
-        <>
-          <div className="components">
-            {/* Scales spelled out: a 12 beside a 5 is unreadable otherwise. */}
-            <div title="The four components, weighted and then decayed by the thread's age — or zero outright if the finding is disqualified, irrelevant, or unwelcome.">
-              <b className={`score ${scoreClass(score)}`}>
-                {score}
-                <span className="of">/100</span>
-              </b>
-              score
-            </div>
-            {COMPONENTS.map(([key, ask]) => (
-              <div key={key} title={ask}>
-                <b>
-                  {assessment[key]}
-                  <span className="of">/5</span>
-                </b>
-                {key}
-              </div>
-            ))}
-            <Age publishedAt={finding.publishedAt} opportunity={assessment.opportunity} />
-          </div>
-          <p>
-            {assessment.disqualified && <span className="flag">disqualified</span>}
-            <strong>{assessment.opportunity ?? "no shape"}</strong> — {assessment.reason}
-          </p>
-          {/* When the judgment was made. The publication date above is the
-              thread's age, which is a different question. */}
-          <p className="muted small">
-            judged {new Date(assessment.createdAt).toLocaleString()} by {assessment.model} ·
-            rubric/brief {assessment.promptFingerprint}
-          </p>
-          <EarlierVerdicts earlier={earlier} current={assessment.promptFingerprint} />
-        </>
-      ) : (
-        // Not muted: a missing verdict is not secondary metadata.
-        <p className="warn">No assessment recorded.</p>
-      )}
-
-      <div className="actions">
-        {TRIAGE_STATUSES.filter((s) => s !== status).map((s) => (
-          <button
-            key={s}
-            title={STATUS_MEANING[s]}
-            onClick={() => void onTriage(id, s, { note: noteDirty ? noteToSave : undefined })}
-          >
-            {s} {KEY_FOR[s] && <kbd>{KEY_FOR[s]}</kbd>}
-          </button>
-        ))}
-        {/* Withheld rather than disabled: without a profile the drafter has no
-            pitch, voice or venue rule to write from, so the request can only
-            come back a 409. Triage and the stored drafts below still work. */}
-        {canDraft && suggestedKind && (
-          <button onClick={() => void draft(suggestedKind)} disabled={drafting}>
-            {drafting ? "Writing…" : `Write a ${suggestedKind}`} {!drafting && <kbd>W</kbd>}
-          </button>
-        )}
-        {canDraft &&
-          DRAFT_KINDS.filter((k) => k !== suggestedKind).map((k) => (
-            <button key={k} onClick={() => void draft(k)} disabled={drafting}>
-              {suggestedKind ? `as ${k}` : `Write a ${k}`}
-            </button>
-          ))}
-      </div>
-      {status === "dismissed" && (
-        <p className="small">
-          <label>
-            Why dismissed{" "}
-            <select
-              value={dismissalCategory ?? ""}
-              onChange={(event) =>
-                void onTriage(id, "dismissed", {
-                  category: (event.target.value || null) as DismissalCategory | null,
-                  amend: true,
-                  // An amendment, like a digit after `d`: its failure is not a
-                  // failed decision, and must not block the digits.
-                  undoable: false,
-                })
-              }
-            >
-              <option value="">not recorded</option>
-              {DISMISSAL_CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          </label>{" "}
-          {dismissalCategory && FIRST_FIX[dismissalCategory] && (
-            <span className="muted">First fix: {FIRST_FIX[dismissalCategory]}</span>
+      <div className="detail-body">
+        <h1>{finding.title}</h1>
+        <p className="muted">
+          <a href={finding.url} target="_blank" rel="noreferrer">
+            {finding.url}
+          </a>
+          <br />
+          {finding.project} · {finding.venue} · {finding.sourceId} ·{" "}
+          {finding.publishedAt ? new Date(finding.publishedAt).toDateString() : "date unknown"} ·{" "}
+          {status}
+          {dismissalCategory && ` (${dismissalCategory})`}
+          {/* What the model is told beyond the text; bears on `reach` and `welcome`. */}
+          {(finding.isThreadComment || finding.author) && (
+            <>
+              <br />
+              {[
+                finding.isThreadComment ? "one comment inside a thread, not the thread itself" : "",
+                finding.author ? `author: ${finding.author}` : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </>
           )}
         </p>
-      )}
-      {profileError && (
-        <p className="warn small">
-          The profiles on disk do not load, so drafting is off until they do: {profileError}
-        </p>
-      )}
-      {!profileAvailable && !profileError && (
-        <p className="warn small">
-          No profile for "{finding.project}" any more. Restore it to write a draft; what is already
-          here stays readable.
-        </p>
-      )}
 
-      {error && <p className="error">{error}</p>}
+        {finding.repository && <Repository facts={finding.repository} />}
+        {finding.metrics && <Engagement metrics={finding.metrics} />}
 
-      {finding.excerpt && <div className="excerpt">{finding.excerpt}</div>}
+        {assessment && hidden ? (
+          <>
+            {/* The age is evidence, not judgment, so it stays. */}
+            <div className="components">
+              <Age publishedAt={finding.publishedAt} opportunity={null} />
+            </div>
+            <p className="muted">
+              The model's judgment is hidden until you triage this.{" "}
+              <button onClick={onReveal}>
+                reveal <kbd>r</kbd>
+              </button>
+            </p>
+          </>
+        ) : assessment ? (
+          <>
+            <div className="components">
+              {/* Scales spelled out: a 12 beside a 5 is unreadable otherwise. */}
+              <div title="The four components, weighted and then decayed by the thread's age — or zero outright if the finding is disqualified, irrelevant, or unwelcome.">
+                <b className={`score ${scoreClass(score)}`}>
+                  {score}
+                  <span className="of">/100</span>
+                </b>
+                score
+              </div>
+              {COMPONENTS.map(([key, ask]) => (
+                <div key={key} title={ask}>
+                  <b>
+                    {assessment[key]}
+                    <span className="of">/5</span>
+                  </b>
+                  {key}
+                </div>
+              ))}
+              <Age publishedAt={finding.publishedAt} opportunity={assessment.opportunity} />
+            </div>
+            <p>
+              {assessment.disqualified && <span className="flag">disqualified</span>}
+              <strong>{assessment.opportunity ?? "no shape"}</strong> — {assessment.reason}
+            </p>
+            {/* When the judgment was made. The publication date above is the
+              thread's age, which is a different question. */}
+            <p className="muted small">
+              judged {new Date(assessment.createdAt).toLocaleString()} by {assessment.model} ·
+              rubric/brief {assessment.promptFingerprint}
+            </p>
+            <EarlierVerdicts earlier={earlier} current={assessment.promptFingerprint} />
+          </>
+        ) : (
+          // Not muted: a missing verdict is not secondary metadata.
+          <p className="warn">No assessment recorded.</p>
+        )}
 
-      <label className="note">
-        <span className="muted small">Note {noteDirty && "· unsaved"}</span>
-        <textarea
-          rows={2}
-          value={noteValue}
-          placeholder="Why this is or is not worth acting on"
-          onChange={(e) => {
-            setNote(e.target.value);
-            pendingNotes.set(id, e.target.value);
-          }}
-          onBlur={() => void saveNote()}
-        />
-      </label>
+        {status === "dismissed" && (
+          <p className="small">
+            <label>
+              Why dismissed{" "}
+              <select
+                value={dismissalCategory ?? ""}
+                onChange={(event) =>
+                  void onTriage(id, "dismissed", {
+                    category: (event.target.value || null) as DismissalCategory | null,
+                    amend: true,
+                    // An amendment, like a digit after `d`: its failure is not a
+                    // failed decision, and must not block the digits.
+                    undoable: false,
+                  })
+                }
+              >
+                <option value="">not recorded</option>
+                {DISMISSAL_CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>{" "}
+            {dismissalCategory && FIRST_FIX[dismissalCategory] && (
+              <span className="muted">First fix: {FIRST_FIX[dismissalCategory]}</span>
+            )}
+          </p>
+        )}
+        {profileError && (
+          <p className="warn small">
+            The profiles on disk do not load, so drafting is off until they do: {profileError}
+          </p>
+        )}
+        {!profileAvailable && !profileError && (
+          <p className="warn small">
+            No profile for "{finding.project}" any more. Restore it to write a draft; what is
+            already here stays readable.
+          </p>
+        )}
 
-      {/* Keep the venue reminder beside stored drafts as well as new ones.
+        {error && <p className="error">{error}</p>}
+
+        {finding.excerpt && <div className="excerpt">{finding.excerpt}</div>}
+
+        <label className="note">
+          <span className="muted small">Note {noteDirty && "· unsaved"}</span>
+          <textarea
+            rows={2}
+            value={noteValue}
+            placeholder="Why this is or is not worth acting on"
+            onChange={(e) => {
+              setNote(e.target.value);
+              pendingNotes.set(id, e.target.value);
+            }}
+            onBlur={() => void saveNote()}
+          />
+        </label>
+
+        {/* Keep the venue reminder beside stored drafts as well as new ones.
           The three states are explained in docs/product/opportunities.md. */}
-      {drafts.length > 0 && (
-        <p className={venueRule ? "muted small" : "warn small"}>
-          {!profileAvailable
-            ? `Whatever the profile for "${finding.project}" recorded about ${finding.venue} is unreadable with it gone — read the venue's rules and what a submission actually requires before posting.`
-            : venueRule
-              ? `Your verified note for ${finding.venue}: ${venueRule} — confirm it still holds and that taking part costs nothing before posting.`
-              : `No verified guidance recorded for ${finding.venue}. Obserf cannot check whether a mention is permitted there or what taking part costs — read the venue's rules and what a submission actually requires before posting. A rule you verify yourself goes in the profile's venueGuidance, with its source and the date you checked.`}
-        </p>
-      )}
+        {drafts.length > 0 && (
+          <p className={venueRule ? "muted small" : "warn small"}>
+            {!profileAvailable
+              ? `Whatever the profile for "${finding.project}" recorded about ${finding.venue} is unreadable with it gone — read the venue's rules and what a submission actually requires before posting.`
+              : venueRule
+                ? `Your verified note for ${finding.venue}: ${venueRule} — confirm it still holds and that taking part costs nothing before posting.`
+                : `No verified guidance recorded for ${finding.venue}. Obserf cannot check whether a mention is permitted there or what taking part costs — read the venue's rules and what a submission actually requires before posting. A rule you verify yourself goes in the profile's venueGuidance, with its source and the date you checked.`}
+          </p>
+        )}
 
-      {drafts.map((d) => (
-        <div key={d.id} className="draft">
-          <div className="draft-head">
-            <span className="muted small">
-              {d.kind} · {new Date(d.createdAt).toLocaleString()} — review, edit, and post it
-              yourself
-            </span>
-            <button onClick={() => void copy(d.id, d.body)}>
-              {copied === d.id ? "Copied" : "Copy"} {d.id === latest?.id && <kbd>c</kbd>}
-            </button>
+        {drafts.map((d) => (
+          <div key={d.id} className="draft">
+            <div className="draft-head">
+              <span className="muted small">
+                {d.kind} · {new Date(d.createdAt).toLocaleString()} — review, edit, and post it
+                yourself
+              </span>
+              <button onClick={() => void copy(d.id, d.body)}>
+                {copied === d.id ? "Copied" : "Copy"} {d.id === latest?.id && <kbd>c</kbd>}
+              </button>
+            </div>
+            <DraftContext draft={d} />
+            {d.body}
           </div>
-          <DraftContext draft={d} />
-          {d.body}
-        </div>
-      ))}
+        ))}
+      </div>
+      <ActionBar
+        status={status}
+        onDecide={(s) => void onTriage(id, s, { note: noteDirty ? noteToSave : undefined })}
+        url={finding.url}
+        sourceId={finding.sourceId}
+        // Withheld rather than disabled: without a profile the drafter has no
+        // pitch, voice or venue rule to write from, so the request can only come
+        // back a 409. Triage and the stored drafts above still work.
+        draftKinds={canDraft ? DRAFT_KINDS : []}
+        suggestedKind={suggestedKind}
+        drafting={drafting}
+        onDraft={(kind) => void draft(kind)}
+      />
     </>
+  );
+}
+
+/**
+ * Pinned to the bottom of the detail pane, so a decision never needs a scroll
+ * back up past a long excerpt or a draft. Every button shows its key.
+ */
+function ActionBar({
+  status,
+  onDecide,
+  url,
+  sourceId,
+  draftKinds,
+  suggestedKind,
+  drafting,
+  onDraft,
+}: {
+  status: TriageStatus;
+  onDecide: (status: TriageStatus) => void;
+  url: string;
+  sourceId: string;
+  /** Empty when drafting is off; the reason is shown in the pane above. */
+  draftKinds: readonly DraftKind[];
+  suggestedKind: DraftKind | null;
+  drafting: boolean;
+  onDraft: (kind: DraftKind) => void;
+}) {
+  const menuId = useId();
+  // The suggestion is the main button; the menu offers the rest, or every kind
+  // when there is nothing to suggest.
+  const primary = suggestedKind && draftKinds.includes(suggestedKind) ? suggestedKind : null;
+  const others = draftKinds.filter((k) => k !== primary);
+  return (
+    <div className="action-bar">
+      <div className="decisions">
+        {DECISIONS.map(([s, label, caption]) => (
+          <button
+            key={s}
+            className={`stacked ${s}`}
+            title={STATUS_MEANING[s]}
+            aria-pressed={s === status}
+            aria-keyshortcuts={KEY_FOR[s]?.toUpperCase()}
+            onClick={() => s !== status && onDecide(s)}
+          >
+            <span>
+              {label} <kbd>{KEY_FOR[s]}</kbd>
+            </span>
+            <span className="caption">{caption}</span>
+          </button>
+        ))}
+        {status !== "new" && (
+          <button title={STATUS_MEANING.new} aria-keyshortcuts="N" onClick={() => onDecide("new")}>
+            New <kbd>n</kbd>
+          </button>
+        )}
+      </div>
+      <div className="tools">
+        <a
+          className="button stacked"
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          aria-keyshortcuts="O"
+        >
+          <span>
+            Open page ↗ <kbd>o</kbd>
+          </span>
+          <span className="caption">
+            {sourceId === "github" ? "review the repository" : "read the page"}
+          </span>
+        </a>
+        {draftKinds.length > 0 && (
+          <div className="split">
+            {primary && (
+              <button
+                className="stacked"
+                title="Writes text for you to review. Obserf never posts."
+                aria-keyshortcuts="Shift+W"
+                disabled={drafting}
+                onClick={() => onDraft(primary)}
+              >
+                <span>
+                  {drafting ? "Writing…" : `Draft ${primary}`} <kbd>⇧W</kbd>
+                </span>
+                <span className="caption">uses model quota</span>
+              </button>
+            )}
+            {others.length > 0 && (
+              <>
+                <button
+                  className={primary ? "more" : "stacked"}
+                  popoverTarget={menuId}
+                  aria-label={primary ? "Draft another kind" : undefined}
+                  title={primary ? "Draft another kind" : undefined}
+                  disabled={drafting}
+                >
+                  {primary ? (
+                    "▾"
+                  ) : (
+                    <>
+                      <span>{drafting ? "Writing…" : "Draft ▾"}</span>
+                      <span className="caption">uses model quota</span>
+                    </>
+                  )}
+                </button>
+                <div id={menuId} popover="auto" className="menu">
+                  {others.map((k) => (
+                    <button
+                      key={k}
+                      popoverTarget={menuId}
+                      popoverTargetAction="hide"
+                      disabled={drafting}
+                      onClick={() => onDraft(k)}
+                    >
+                      Draft {k}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
