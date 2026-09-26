@@ -16,6 +16,10 @@
   --good: light-dark(oklch(0.48 0.13 155), oklch(0.76 0.15 155));
   --mid: light-dark(oklch(0.5 0.12 70), oklch(0.8 0.14 78));
   --bad: light-dark(oklch(0.55 0.19 25), oklch(0.7 0.17 25));
+  --bad-bg: light-dark(oklch(0.55 0.19 25 / 0.09), oklch(0.7 0.17 25 / 0.12));
+  /* The operator's own words: warm, apart from the model's blue. */
+  --you-bg: light-dark(oklch(0.97 0.01 85), oklch(0.22 0.012 80));
+  --you-line: light-dark(oklch(0.86 0.02 85), oklch(0.36 0.02 80));
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -235,7 +239,6 @@ kbd {
 
 .note {
   display: block;
-  margin: 20px 0;
 }
 .note textarea {
   display: block;
@@ -422,9 +425,11 @@ a {
   color: var(--accent);
 }
 h1 {
-  font-size: 19px;
-  margin: 0 0 6px;
-  line-height: 1.35;
+  font-size: 20px;
+  margin: 0;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  text-wrap: pretty;
 }
 
 /* The scale a number is on, inside the number's own tile. */
@@ -643,4 +648,175 @@ dialog.shortcuts:focus-visible {
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 8px;
+}
+
+/* The detail pane, in reading order: who and where, what the model says, what
+   the page says, how code scored it, the evidence, drafts, and the note. */
+.detail-body {
+  max-width: 780px;
+}
+.detail-body > * {
+  margin-block: 0 22px;
+}
+.detail-body h2 {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.detail-body h2 .count {
+  font-weight: 400;
+  text-transform: none;
+}
+.finding-head {
+  display: grid;
+  gap: 6px;
+}
+.finding-head p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.finding-head .crumbs {
+  font-size: 12px;
+}
+.finding-head .reason {
+  color: var(--bad);
+}
+.pill {
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--dot);
+  font-weight: 500;
+}
+code {
+  font:
+    12px ui-monospace,
+    monospace;
+}
+
+/* Who is speaking: MODEL for the model's judgment, SCORE · CODE for the
+   arithmetic, YOU for the operator. */
+.chip {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font:
+    600 9.5px ui-monospace,
+    monospace;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.chip.model {
+  border-color: transparent;
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.chip.you {
+  border-color: transparent;
+  background: var(--text);
+  color: var(--bg);
+}
+
+.verdict {
+  display: grid;
+  gap: 6px;
+  max-width: 74ch;
+}
+.verdict p {
+  margin: 0;
+}
+.verdict .label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.verdict-text {
+  font-size: 15px;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+.forced {
+  padding: 7px 12px;
+  border-radius: 6px;
+  background: var(--bad-bg);
+  font-size: 12.5px;
+}
+.forced b {
+  color: var(--bad);
+}
+
+.judgment-hidden {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+}
+.judgment-hidden p {
+  flex: 1;
+  margin: 0;
+}
+.judgment-hidden b {
+  color: var(--text);
+}
+
+.detail-body .excerpt {
+  margin: 0;
+  max-width: 74ch;
+  line-height: 1.6;
+}
+
+.scoreline {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.scoreline p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin: 0;
+}
+.scoreline b {
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+}
+.scoreline .score {
+  font-size: 14px;
+}
+.scoreline span[title] {
+  white-space: nowrap;
+}
+
+.note-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.note-label h2 {
+  margin: 0;
+}
+.detail-body .note textarea {
+  margin: 0;
+  border-color: var(--you-line);
+  background: var(--you-bg);
 }

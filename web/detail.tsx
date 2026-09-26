@@ -53,6 +53,18 @@ export interface TriageOptions {
   amend?: boolean;
 }
 
+/**
+ * Why the score is zero when a hard rule made it so, in the order
+ * `pipeline/score.ts` checks them. Worded as what the model judged, not as fact
+ * about the venue: welcome 0 is its reading of the page, not a recorded rule.
+ */
+function forcedZero(a: Assessment): string | null {
+  if (a.disqualified) return "The model disqualified it; the verdict says why.";
+  if (a.relevance === 0) return "Relevance is 0: not about the problem the project solves.";
+  if (a.welcome === 0) return "Welcome is 0: the model judged a mention unwelcome here.";
+  return null;
+}
+
 export function scoreClass(score: number): string {
   return score >= 70 ? "high" : score >= 40 ? "mid" : "low";
 }
@@ -243,84 +255,31 @@ export function Detail({
   return (
     <>
       <div className="detail-body">
-        <h1>{finding.title}</h1>
-        <p className="muted">
-          <a href={finding.url} target="_blank" rel="noreferrer">
-            {finding.url}
-          </a>
-          <br />
-          {finding.project} · {finding.venue} · {finding.sourceId} ·{" "}
-          {finding.publishedAt ? new Date(finding.publishedAt).toDateString() : "date unknown"} ·{" "}
-          {status}
-          {dismissalCategory && ` (${dismissalCategory})`}
-          {/* What the model is told beyond the text; bears on `reach` and `welcome`. */}
-          {(finding.isThreadComment || finding.author) && (
-            <>
-              <br />
-              {[
-                finding.isThreadComment ? "one comment inside a thread, not the thread itself" : "",
-                finding.author ? `author: ${finding.author}` : "",
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            </>
-          )}
-        </p>
-
-        {finding.repository && <Repository facts={finding.repository} />}
-        {finding.metrics && <Engagement metrics={finding.metrics} />}
-
-        {assessment && hidden ? (
-          <>
-            {/* The age is evidence, not judgment, so it stays. */}
-            <div className="components">
-              <Age publishedAt={finding.publishedAt} opportunity={null} />
-            </div>
-            <p className="muted">
-              The model's judgment is hidden until you triage this.{" "}
-              <button onClick={onReveal}>
-                reveal <kbd>r</kbd>
-              </button>
-            </p>
-          </>
-        ) : assessment ? (
-          <>
-            <div className="components">
-              {/* Scales spelled out: a 12 beside a 5 is unreadable otherwise. */}
-              <div title="The four components, weighted and then decayed by the thread's age — or zero outright if the finding is disqualified, irrelevant, or unwelcome.">
-                <b className={`score ${scoreClass(score)}`}>
-                  {score}
-                  <span className="of">/100</span>
-                </b>
-                score
-              </div>
-              {COMPONENTS.map(([key, ask]) => (
-                <div key={key} title={ask}>
-                  <b>
-                    {assessment[key]}
-                    <span className="of">/5</span>
-                  </b>
-                  {key}
-                </div>
-              ))}
-              <Age publishedAt={finding.publishedAt} opportunity={assessment.opportunity} />
-            </div>
-            <p>
-              {assessment.disqualified && <span className="flag">disqualified</span>}
-              <strong>{assessment.opportunity ?? "no shape"}</strong> — {assessment.reason}
-            </p>
-            {/* When the judgment was made. The publication date above is the
-              thread's age, which is a different question. */}
-            <p className="muted small">
-              judged {new Date(assessment.createdAt).toLocaleString()} by {assessment.model} ·
-              rubric/brief {assessment.promptFingerprint}
-            </p>
-            <EarlierVerdicts earlier={earlier} current={assessment.promptFingerprint} />
-          </>
-        ) : (
-          // Not muted: a missing verdict is not secondary metadata.
-          <p className="warn">No assessment recorded.</p>
-        )}
+        <header className="finding-head">
+          <p className="crumbs">
+            <span>{finding.project}</span>
+            <span aria-hidden="true">/</span>
+            <code>{finding.sourceId}</code>
+            <span className="pill" data-status={status}>
+              {status}
+            </span>
+            {dismissalCategory && <code className="reason">reason: {dismissalCategory}</code>}
+          </p>
+          <h1>{finding.title}</h1>
+          <p className="meta">
+            <a href={finding.url} target="_blank" rel="noreferrer" title={finding.url}>
+              {finding.venue} ↗
+            </a>
+            {/* What the model is told beyond the text; bears on `reach` and `welcome`. */}
+            {finding.author && <span>by {finding.author}</span>}
+            <span>
+              {finding.publishedAt ? new Date(finding.publishedAt).toDateString() : "date unknown"}
+            </span>
+            {finding.isThreadComment && (
+              <span>one comment inside a thread, not the thread itself</span>
+            )}
+          </p>
+        </header>
 
         {status === "dismissed" && (
           <p className="small">
@@ -362,15 +321,146 @@ export function Detail({
             already here stays readable.
           </p>
         )}
-
         {error && <p className="error">{error}</p>}
 
-        {finding.excerpt && <div className="excerpt">{finding.excerpt}</div>}
+        {/* The verdict first: it is the sentence the decision turns on. */}
+        {assessment && hidden ? (
+          <div className="judgment-hidden">
+            <p>
+              <b>Judgment hidden.</b> Score, components, type and verdict stay covered until you
+              decide or reveal them.
+            </p>
+            <button onClick={onReveal} aria-keyshortcuts="R">
+              Reveal <kbd>r</kbd>
+            </button>
+          </div>
+        ) : assessment ? (
+          <section className="verdict" aria-label="Model verdict">
+            <p className="label">
+              <span className="chip model">MODEL</span>
+              verdict · {assessment.opportunity ?? "no shape"} · {assessment.model}
+            </p>
+            {forcedZero(assessment) && (
+              <p className="forced">
+                <b>Score forced to 0.</b> {forcedZero(assessment)}
+              </p>
+            )}
+            <p className="verdict-text">{assessment.reason}</p>
+          </section>
+        ) : (
+          // Not muted: a missing verdict is not secondary metadata.
+          <p className="warn">No assessment recorded.</p>
+        )}
 
-        <label className="note">
-          <span className="muted small">Note {noteDirty && "· unsaved"}</span>
+        {finding.excerpt && (
+          <section>
+            <h2>From the page</h2>
+            <div className="excerpt">{finding.excerpt}</div>
+          </section>
+        )}
+
+        <section className="scoreline" aria-label="Score">
+          {assessment && !hidden && (
+            <>
+              <p>
+                <span
+                  className="chip"
+                  title="Computed by code from the model's components and the thread's age — or zero outright if the finding is disqualified, irrelevant or unwelcome."
+                >
+                  SCORE · CODE
+                </span>
+                <b className={`score ${scoreClass(score)}`}>
+                  {score}
+                  <span className="of">/100</span>
+                </b>
+                <Age publishedAt={finding.publishedAt} opportunity={assessment.opportunity} />
+              </p>
+              <p
+                role="group"
+                aria-label={`Model components: ${COMPONENTS.map(([key]) => `${key} ${assessment[key]} of 5`).join(", ")}`}
+              >
+                <span className="chip model" aria-hidden="true">
+                  MODEL
+                </span>
+                {/* Scales spelled out: a 12 beside a 5 is unreadable otherwise. */}
+                {COMPONENTS.map(([key, ask]) => (
+                  <span key={key} title={ask} aria-hidden="true">
+                    {key} <b>{assessment[key]}</b>
+                    <span className="of">/5</span>
+                  </span>
+                ))}
+              </p>
+            </>
+          )}
+          {/* The age is evidence, not judgment, so it stays while hidden. */}
+          {(!assessment || hidden) && (
+            <p>
+              <Age publishedAt={finding.publishedAt} opportunity={null} />
+            </p>
+          )}
+        </section>
+
+        {(finding.repository || finding.metrics) && (
+          <section>
+            <h2>Evidence</h2>
+            {finding.repository && <Repository facts={finding.repository} />}
+            {finding.metrics && <Engagement metrics={finding.metrics} />}
+          </section>
+        )}
+
+        {assessment && !hidden && (
+          <>
+            {/* When the judgment was made. The publication date above is the
+              thread's age, which is a different question. */}
+            <p className="muted small">
+              judged {new Date(assessment.createdAt).toLocaleString()} by {assessment.model} ·
+              rubric/brief {assessment.promptFingerprint}
+            </p>
+            <EarlierVerdicts earlier={earlier} current={assessment.promptFingerprint} />
+          </>
+        )}
+
+        <section>
+          <h2>Drafts {drafts.length > 0 && <span className="count">{drafts.length}</span>}</h2>
+          {/* Keep the venue reminder beside stored drafts as well as new ones.
+            The three states are explained in docs/product/opportunities.md. */}
+          {drafts.length > 0 && (
+            <p className={venueRule ? "muted small" : "warn small"}>
+              {!profileAvailable
+                ? `Whatever the profile for "${finding.project}" recorded about ${finding.venue} is unreadable with it gone — read the venue's rules and what a submission actually requires before posting.`
+                : venueRule
+                  ? `Your verified note for ${finding.venue}: ${venueRule} — confirm it still holds and that taking part costs nothing before posting.`
+                  : `No verified guidance recorded for ${finding.venue}. Obserf cannot check whether a mention is permitted there or what taking part costs — read the venue's rules and what a submission actually requires before posting. A rule you verify yourself goes in the profile's venueGuidance, with its source and the date you checked.`}
+            </p>
+          )}
+          {drafts.map((d) => (
+            <div key={d.id} className="draft">
+              <div className="draft-head">
+                <span className="muted small">
+                  {d.kind} · {new Date(d.createdAt).toLocaleString()} — review, edit, and post it
+                  yourself
+                </span>
+                <button onClick={() => void copy(d.id, d.body)}>
+                  {copied === d.id ? "Copied" : "Copy"} {d.id === latest?.id && <kbd>c</kbd>}
+                </button>
+              </div>
+              <DraftContext draft={d} />
+              {d.body}
+            </div>
+          ))}
+          {drafts.length === 0 && <p className="muted small">No drafts yet.</p>}
+        </section>
+
+        {/* Last, and marked as the operator's own words rather than the model's. */}
+        <section className="note">
+          <div className="note-label">
+            <span className="chip you">YOU</span>
+            <h2 id="note-heading">Note</h2>
+            {noteDirty && <span className="muted small">unsaved</span>}
+          </div>
           <textarea
             rows={2}
+            aria-labelledby="note-heading"
             value={noteValue}
             placeholder="Why this is or is not worth acting on"
             onChange={(e) => {
@@ -379,35 +469,7 @@ export function Detail({
             }}
             onBlur={() => void saveNote()}
           />
-        </label>
-
-        {/* Keep the venue reminder beside stored drafts as well as new ones.
-          The three states are explained in docs/product/opportunities.md. */}
-        {drafts.length > 0 && (
-          <p className={venueRule ? "muted small" : "warn small"}>
-            {!profileAvailable
-              ? `Whatever the profile for "${finding.project}" recorded about ${finding.venue} is unreadable with it gone — read the venue's rules and what a submission actually requires before posting.`
-              : venueRule
-                ? `Your verified note for ${finding.venue}: ${venueRule} — confirm it still holds and that taking part costs nothing before posting.`
-                : `No verified guidance recorded for ${finding.venue}. Obserf cannot check whether a mention is permitted there or what taking part costs — read the venue's rules and what a submission actually requires before posting. A rule you verify yourself goes in the profile's venueGuidance, with its source and the date you checked.`}
-          </p>
-        )}
-
-        {drafts.map((d) => (
-          <div key={d.id} className="draft">
-            <div className="draft-head">
-              <span className="muted small">
-                {d.kind} · {new Date(d.createdAt).toLocaleString()} — review, edit, and post it
-                yourself
-              </span>
-              <button onClick={() => void copy(d.id, d.body)}>
-                {copied === d.id ? "Copied" : "Copy"} {d.id === latest?.id && <kbd>c</kbd>}
-              </button>
-            </div>
-            <DraftContext draft={d} />
-            {d.body}
-          </div>
-        ))}
+        </section>
       </div>
       <ActionBar
         status={status}
@@ -440,25 +502,21 @@ function Age({
   opportunity: OpportunityType | null;
 }) {
   if (!publishedAt) {
-    return (
-      <div title="No publication date, so no decay was applied.">
-        <b>?</b>age unknown
-      </div>
-    );
+    return <span title="No publication date, so no decay was applied.">age unknown</span>;
   }
   const days = Math.max(0, Math.floor((Date.now() - new Date(publishedAt).getTime()) / DAY_MS));
   const evergreen = opportunity !== null && EVERGREEN.has(opportunity);
   return (
-    <div
+    <span
       title={
         evergreen
           ? "The thread's age now. Listings do not decay: an old curated list still merging pull requests is a live opportunity."
           : "The thread's age now. Scores decay with age — halved every 30 days, floored at 15%."
       }
     >
-      <b>{days}d</b>
-      {evergreen ? "old · evergreen" : "old"}
-    </div>
+      age <b>{days}d</b>
+      {evergreen && " · evergreen"}
+    </span>
   );
 }
 
