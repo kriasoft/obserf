@@ -101,7 +101,7 @@ export interface RunsMarker {
   lastAssessment: number;
 }
 
-/** Whether `a` has every run `b` has: none recorded that `a` lacks. */
+/** Whether `a` has everything `b` has: no run, finish or verdict recorded that `a` lacks. */
 export function covers(a: RunsMarker, b: RunsMarker): boolean {
   return a.lastRun >= b.lastRun && a.finished >= b.finished && a.lastAssessment >= b.lastAssessment;
 }
