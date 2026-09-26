@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useRef } from "react";
 import { type DraftKind, type TriageStatus } from "../vocabulary";
 import { KEY_FOR } from "./keyboard";
 
@@ -51,12 +51,31 @@ export function ActionBar({
   onDraft: (kind: DraftKind) => void;
 }) {
   const menuId = useId();
+  /**
+   * The bar's height, published on the detail column for the toast floating
+   * above it where anchor positioning is missing: the bar wraps to two rows in
+   * a narrow pane, and a fixed offset then covers its top row.
+   */
+  const bar = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bar.current;
+    const column = el?.closest<HTMLElement>(".detail-column");
+    if (!el || !column) return;
+    const observer = new ResizeObserver(() =>
+      column.style.setProperty("--bar-height", `${el.offsetHeight}px`),
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      column.style.removeProperty("--bar-height");
+    };
+  }, []);
   // The suggestion is the main button; the menu offers the rest, or every kind
   // when there is nothing to suggest.
   const primary = suggestedKind && draftKinds.includes(suggestedKind) ? suggestedKind : null;
   const others = draftKinds.filter((k) => k !== primary);
   return (
-    <div className="action-bar">
+    <div className="action-bar" ref={bar}>
       <div className="decisions">
         {DECISIONS.map(([s, label, caption]) => (
           <button

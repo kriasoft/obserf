@@ -759,13 +759,13 @@ dialog.shortcuts:focus-visible {
   outline: none;
 }
 
-/* Above the action bar when there is one; the fallback offset clears a
-   one-row bar where anchor positioning is missing, and the page bottom when no
-   finding is open. */
+/* Above the action bar when there is one. Where anchor positioning is missing,
+   the bar publishes its height (see ActionBar), and with no finding open the
+   toast sits near the page bottom. */
 .toast {
   position: absolute;
   left: 50%;
-  bottom: 96px;
+  bottom: calc(var(--bar-height, 0px) + 8px);
   translate: -50% 0;
   z-index: 2;
   width: max-content;
