@@ -4,6 +4,8 @@ import { useEffect, useState, type ReactNode } from "react";
  * The colour theme. "system" is stored as absence, so the page follows the OS
  * until the operator pins a scheme; `app.css` resolves every colour through
  * `light-dark()`, so pinning is only a `color-scheme` override on the root.
+ * web/index.html reads the same key before the first paint, so a pinned theme
+ * never flashes the OS one; change both together.
  */
 const THEME_KEY = "obserf.theme";
 
