@@ -68,6 +68,12 @@ jobs:
       # the tarball, but a new source file is easy to forget. Nothing here reads
       # the list; the steps below prove each file present by running a command
       # that needs it.
+      # npm "auto-corrects" a manifest it dislikes at publish time, which for
+      # `bin: ./cli.ts` meant dropping the command, with only a warning. Pack
+      # does not do that, so nothing below would notice.
+      - name: npm publishes the manifest as written
+        run: npm pkg fix && git diff --exit-code package.json
+
       - name: Pack
         run: |
           npm pack --pack-destination /tmp >/dev/null

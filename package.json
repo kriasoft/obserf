@@ -47,7 +47,7 @@
     "access": "public"
   },
   "bin": {
-    "obserf": "./cli.ts"
+    "obserf": "cli.ts"
   },
   "scripts": {
     "obserf": "bun run cli.ts",

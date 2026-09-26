@@ -49,4 +49,6 @@ jobs:
           node-version: 24
       - run: npm install -g npm@12
 
-      - run: npm stage publish
+      # Verbose, because a refused OIDC exchange is logged only at that level and
+      # otherwise surfaces as a bare ENEEDAUTH.
+      - run: npm stage publish --loglevel verbose
