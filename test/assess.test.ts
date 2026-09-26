@@ -120,10 +120,6 @@ describe("candidateBlock", () => {
   });
 });
 
-// `opportunity: null` means the moment is none of the five shapes, which is the
-// definition of not being an opportunity. The schema types the two fields
-// independently, so the model can assert both at once; the weighted score
-// ignores `opportunity`, so such a verdict would otherwise outrank real findings.
 describe("candidateBlock names the candidate's shape", () => {
   test("says so when the candidate is one comment inside a thread", () => {
     expect(candidateBlock(candidate({ isThreadComment: true }))).toContain(
@@ -137,6 +133,10 @@ describe("candidateBlock names the candidate's shape", () => {
   });
 });
 
+// `opportunity: null` means the moment is none of the five shapes, which is the
+// definition of not being an opportunity. The schema types the two fields
+// independently, so the model can assert both at once; the weighted score
+// ignores `opportunity`, so such a verdict would otherwise outrank real findings.
 describe("a verdict that names no opportunity type", () => {
   const verdict = {
     relevance: 5,
