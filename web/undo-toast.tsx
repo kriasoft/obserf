@@ -20,12 +20,6 @@ export interface UndoRecord {
   posted?: string;
 }
 
-/**
- * The decision just made, floating above the action bar: what it was, how to
- * take it back, and the one follow-up it invites. Belongs to the undo record,
- * not the selection, which the decision has already moved on — so it stays up
- * while the operator reads the next finding, and nothing waits for it.
- */
 /** The decision in a word: "Dismissed", "Back to new". */
 function decisionLabel(undo: UndoRecord): string {
   return undo.to === "new" ? "Back to new" : undo.to[0]!.toUpperCase() + undo.to.slice(1);
@@ -44,6 +38,12 @@ export function announcement(undo: UndoRecord | null): string {
   return `${decisionLabel(undo)}${reason}${posted}: ${undo.title}. Press u to undo.`;
 }
 
+/**
+ * The decision just made, floating above the action bar: what it was, how to
+ * take it back, and the one follow-up it invites. Belongs to the undo record,
+ * not the selection, which the decision has already moved on — so it stays up
+ * while the operator reads the next finding, and nothing waits for it.
+ */
 export function UndoToast({
   undo,
   onUndo,
