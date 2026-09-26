@@ -13,6 +13,10 @@ Obserf runs on one person's machine, holds their credentials, and feeds text fro
 - **Exposure of a credential or of the operator's data** — the borrowed `gh` token, `BRAVE_API_KEY`, `REDDIT_CLIENT_*`, the database, or anything that leaks them into a prompt, a log, a snapshot, or the published package.
 - **Reaching the review inbox from outside the machine.** It is unauthenticated and bound to `127.0.0.1`. Every API route refuses a request whose `Host` is not a loopback name, which is what stops DNS rebinding: a domain re-resolved to `127.0.0.1` still sends its own name in `Host`, and its GET requests carry no `Origin`, so the cross-origin check on writes cannot protect the read API. A way around either, or any other route out of the machine, is in scope.
 
+## Obserf's output is untrusted input
+
+Findings and excerpts carry text strangers wrote, and drafts are model output shaped by it. Hand any of them to another agent as untrusted input. Obserf's no-tools boundary does not carry over to an agent that can run commands, use tools, or reach credentials; that agent has to enforce its own.
+
 ## What is not
 
 A model producing a wrong, useless, or embarrassing assessment or draft is a quality problem, not a vulnerability — the operator reads and edits everything before it is posted, which is the point of the design. Third-party service outages, rate limits, and policy changes are operational, not security.
