@@ -7,7 +7,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import * as schema from "./schema";
@@ -27,7 +27,12 @@ type KnownFindingState = Pick<
   disqualified: boolean;
 };
 
-import { databasePath, requireCreatableDatabase, requireWorkspace } from "../workspace";
+import {
+  databasePath,
+  requireCreatableDatabase,
+  requireReachableDatabase,
+  requireWorkspace,
+} from "../workspace";
 import { migrate } from "./migrate";
 
 export { databasePath };
@@ -106,12 +111,13 @@ export interface ListOptions {
   limit?: number;
 }
 
-/** Findings with their latest assessment and current triage status, best first. */
-export function latestFindings(options: ListOptions = {}): ListedFinding[] {
-  const { project, status, minScore, limit = 50 } = options;
-
-  // Append-only assessments mean max(id) is the newest without a tie-break on time.
-  const latest = db
+/**
+ * Each finding's newest assessment id, as a joinable subquery. Assessments are
+ * append-only, so max(id) is the newest. Shared so the inbox and the gate agree
+ * on which verdict is current.
+ */
+function latestAssessmentIds(database: ReturnType<typeof drizzle>) {
+  return database
     .select({
       findingId: schema.assessments.findingId,
       assessmentId: sql<number>`max(${schema.assessments.id})`.as("assessment_id"),
@@ -119,6 +125,13 @@ export function latestFindings(options: ListOptions = {}): ListedFinding[] {
     .from(schema.assessments)
     .groupBy(schema.assessments.findingId)
     .as("latest");
+}
+
+/** Findings with their latest assessment and current triage status, best first. */
+export function latestFindings(options: ListOptions = {}): ListedFinding[] {
+  const { project, status, minScore, limit = 50 } = options;
+
+  const latest = latestAssessmentIds(db);
 
   const filters = [
     project ? eq(schema.findings.project, project) : undefined,
@@ -221,17 +234,67 @@ export function setTriage(
  * is worth looking at again.
  */
 export function knownFindings(project: string): Map<string, KnownFindingState> {
-  // Append-only assessments mean max(id) is the newest, as in `latestFindings`.
-  const latest = db
-    .select({
-      findingId: schema.assessments.findingId,
-      assessmentId: sql<number>`max(${schema.assessments.id})`.as("assessment_id"),
-    })
-    .from(schema.assessments)
-    .groupBy(schema.assessments.findingId)
-    .as("latest");
+  return knownFindingsIn(db, project);
+}
 
-  const rows = db
+/**
+ * `knownFindings` through a private connection, for `scan --dry-run`: opening the
+ * shared one migrates the database and switches it to WAL, and a dry run must
+ * change nothing. `query_only` refuses SQL writes.
+ *
+ * Read-write anyway: Bun's read-only open (measured on 1.4.2) fails with "unable
+ * to open database file" on a WAL database whose `-wal` and `-shm` are gone —
+ * the usual state after a clean close on Linux and Windows, or of a copied file.
+ * So SQLite may still create sidecars and checkpoint on close; what holds is no
+ * SQL write and no migration.
+ *
+ * Failures propagate: operators record a dry run's survivor count
+ * (`docs/product/evaluation.md`), and one computed from unreadable history is
+ * wrong, not conservative.
+ *
+ * `path` is for tests, which need a WAL database with no live connection.
+ */
+export function knownFindingsForDryRun(
+  project: string,
+  path: string = databasePath,
+): Map<string, KnownFindingState> {
+  // The opener's rule minus creation: a mistyped `OBSERF_DB` fails instead of
+  // reading as empty history. Test paths skip it.
+  if (path === databasePath) requireReachableDatabase();
+  // Only a missing file is empty history; `existsSync` would also answer false
+  // for one it could not stat.
+  if (!statSync(path, { throwIfNoEntry: false })) return new Map();
+
+  let handle: Database | undefined;
+  try {
+    handle = new Database(path, { readwrite: true, create: false });
+    // Wait out a concurrent scan's lock rather than fail on it.
+    handle.exec("PRAGMA busy_timeout = 10000");
+    handle.exec("PRAGMA query_only = ON");
+    return knownFindingsIn(drizzle(handle, { schema, casing: "snake_case" }), project);
+  } catch (error) {
+    // Dry runs never migrate, so an older schema is the likeliest cause.
+    throw new Error(
+      `Could not read what is already known from ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }. If this database predates the installed obserf, run \`obserf list\` once to upgrade it.`,
+      { cause: error },
+    );
+  } finally {
+    // `true` finalizes Drizzle's prepared statements; without it the connection
+    // outlives `close()` until they are collected.
+    handle?.close(true);
+  }
+}
+
+/** One query for both connections, so a dry run's gate counts cannot drift from a scan's. */
+function knownFindingsIn(
+  database: ReturnType<typeof drizzle>,
+  project: string,
+): Map<string, KnownFindingState> {
+  const latest = latestAssessmentIds(database);
+
+  const rows = database
     .select({
       url: schema.findings.url,
       title: schema.findings.title,
@@ -263,64 +326,6 @@ export function knownFindings(project: string): Map<string, KnownFindingState> {
       },
     ]),
   );
-}
-
-/**
- * Same as `knownFindings`, through a separate read-only connection: no WAL
- * switch or schema changes. This is what `scan --dry-run` uses so it can report
- * history-aware counts without database writes.
- *
- * Returns an empty map when there is no database, or when the file predates the
- * schema: for a dry run, an unreadable history means "nothing known", which
- * over-reports new candidates rather than hiding them.
- */
-export function knownFindingsReadOnly(project: string): Map<string, KnownFindingState> {
-  if (!existsSync(databasePath)) return new Map();
-  let handle: Database | undefined;
-  try {
-    handle = new Database(databasePath, { readonly: true });
-    const rows = handle
-      .query(
-        `SELECT f.url, f.title, f.excerpt, f.metrics, f.is_thread_comment,
-                COALESCE(t.status, 'new') AS status,
-                a.created_at AS last_assessed_at,
-                a.disqualified AS disqualified
-           FROM findings f
-           LEFT JOIN triage t ON t.finding_id = f.id
-           LEFT JOIN assessments a
-                  ON a.id = (SELECT max(id) FROM assessments WHERE finding_id = f.id)
-          WHERE f.project = ?`,
-      )
-      .all(project) as Array<{
-      url: string;
-      title: string;
-      excerpt: string;
-      metrics: string | null;
-      is_thread_comment: number | null;
-      status: TriageStatus;
-      last_assessed_at: number | null;
-      disqualified: number | null;
-    }>;
-    return new Map(
-      rows.map((row) => [
-        row.url,
-        {
-          status: row.status,
-          // Raw SQLite, so timestamps and booleans arrive unhydrated.
-          lastAssessedAt: row.last_assessed_at ? new Date(row.last_assessed_at * 1000) : null,
-          disqualified: row.disqualified === 1,
-          title: row.title,
-          excerpt: row.excerpt,
-          metrics: row.metrics ? (JSON.parse(row.metrics) as schema.Finding["metrics"]) : null,
-          isThreadComment: row.is_thread_comment === null ? null : row.is_thread_comment === 1,
-        },
-      ]),
-    );
-  } catch {
-    return new Map();
-  } finally {
-    handle?.close();
-  }
 }
 
 export function draftsFor(findingId: number): schema.Draft[] {

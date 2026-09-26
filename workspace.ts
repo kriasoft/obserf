@@ -84,25 +84,28 @@ export const databasePath: string = process.env.OBSERF_DB
 export const backupsDir: string = join(stateDir, "backups");
 
 /**
- * That a database may be created at `databasePath`, and that its directory
- * exists — the two halves of "you may write a new database here".
- *
- * The workspace's own is created on demand: `obserf init` then `obserf scan` is
- * the whole setup, and `obserf restore` can rebuild a workspace straight from a
- * snapshot. One named by `OBSERF_DB` is not: you set that to reach a database
- * you already have, so a typo has to fail rather than quietly become an empty
- * second one. Both the opener and the restorer answer to this, because a rule
- * stated twice is a rule that drifts.
+ * That a command may reach `databasePath`: there is a workspace, and a database
+ * named by `OBSERF_DB` exists. That variable is set to reach a database you have,
+ * so a typo must fail rather than read as empty or become a second database. The
+ * workspace's own may be absent: `obserf init` then `obserf scan` is the setup.
  */
-export function requireCreatableDatabase(): void {
+export function requireReachableDatabase(): void {
   requireWorkspace();
-  if (existsSync(databasePath)) return;
-  if (process.env.OBSERF_DB) {
+  if (process.env.OBSERF_DB && !existsSync(databasePath)) {
     throw new Error(
       `No database at ${databasePath} (OBSERF_DB). Unset it to use the workspace's own.`,
     );
   }
-  mkdirSync(dirname(databasePath), { recursive: true });
+}
+
+/**
+ * That a database may be created at `databasePath`, and its directory exists.
+ * The opener and `obserf restore`, which can rebuild a workspace from a snapshot,
+ * answer to this; the dry run, which creates nothing, only to the check above.
+ */
+export function requireCreatableDatabase(): void {
+  requireReachableDatabase();
+  if (!existsSync(databasePath)) mkdirSync(dirname(databasePath), { recursive: true });
 }
 
 /** Fails with the path it looked at, because "no workspace" is usually "wrong directory". */

@@ -4,7 +4,7 @@
 
 import { eq } from "drizzle-orm";
 import { config } from "../config";
-import { db, knownFindings, knownFindingsReadOnly, schema } from "../db";
+import { db, knownFindings, knownFindingsForDryRun, schema } from "../db";
 import { emptyUsage, pool, type Usage } from "../agent";
 import type { ProjectProfile } from "../project";
 import { selectSources, type Candidate } from "../sources";
@@ -17,7 +17,7 @@ import { score } from "./score";
 export interface ScanOptions {
   /** Overrides the project's default sources. */
   sourceIds?: string[];
-  /** Discover and gate, but make no model calls and write nothing. */
+  /** Discover and gate without model calls, migrations, or application-data writes. */
   dryRun?: boolean;
   onProgress?: (event: ScanEvent) => void;
 }
@@ -136,9 +136,8 @@ export async function scan(
       .run();
   }
 
-  // A dry run reads the existing database through a read-only connection so it
-  // can report history-aware counts without database writes.
-  const known = dryRun ? knownFindingsReadOnly(project.key) : knownFindings(project.key);
+  // A dry run still needs history for honest gate counts, but must not migrate.
+  const known = dryRun ? knownFindingsForDryRun(project.key) : knownFindings(project.key);
   // Computed once rather than per candidate: it is identical for every
   // assessment in a scan.
   const fingerprint = assessPromptFingerprint(project);

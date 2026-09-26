@@ -42,6 +42,7 @@ agent.ts             Claude Agent SDK wrapper: ask, askForJson, pool
 db/
   schema.ts          Drizzle tables
   index.ts           Connection, resolved path, schema check, query helpers
+  migrate.ts         Applies pending migrations when the shared connection opens
   backup.ts          VACUUM INTO snapshots, and the way back from one
 sources/
   types.ts           Source and Candidate contracts
@@ -75,7 +76,9 @@ Profiles and the database are not here. They live in an operator's workspace, wh
 
 `index.ts` is inert: nothing it reaches reads the environment, the working directory, or the disk. A workspace's `obserf.config.ts` imports it while Obserf is dynamically loading that very file, so the public entry must not be what decides where the workspace is. `workspace.ts` depends on `index.ts`; never the reverse.
 
-The database is opened lazily, and opening it for writing applies any pending migration from `drizzle/` first ([ADR-011](adr/011-the-engine-owns-the-schema.md)). `scan --dry-run` and the read-only history query never take that path, which is what keeps a dry run free of writes.
+The database is opened lazily, and opening it through the shared connection applies any pending migration from `drizzle/` first ([ADR-011](adr/011-the-engine-owns-the-schema.md)). `scan --dry-run` never takes that path: it reads history through a connection of its own, which neither migrates nor switches journal mode.
+
+That connection refuses SQL writes (`query_only`) but is opened read-write, because Bun's read-only open fails on a WAL database whose sidecars are gone; SQLite may therefore create them and checkpoint on close. Unreadable history fails the dry run rather than reading as empty, since gate counts computed without it are wrong, not conservative.
 
 `vocabulary.ts` supplies the review inbox's runtime enums and default draft-kind mapping without database or pipeline dependencies. Both the browser and server import it directly; `db/schema.ts` uses its types but does not re-export them. Keep it free of imports so server-only dependencies cannot enter the browser bundle through shared vocabulary.
 
