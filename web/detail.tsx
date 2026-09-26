@@ -521,12 +521,17 @@ function Working({ breakdown }: { breakdown: ScoreExplanation }) {
           </div>
           <div>
             <dt>age factor</dt>
-            <dd>×{freshness.toFixed(2)}</dd>
+            {/* Three places: `weighted` is a whole number, so the product below
+                then agrees with the factor shown to the digit it is read at. */}
+            <dd>×{freshness.toFixed(3)}</dd>
           </div>
           <div>
             <dt>score</dt>
             <dd>
-              {weighted.toFixed(1)} × {freshness.toFixed(2)} ≈ {score}
+              {/* The product before rounding, or a factor shown to two places can
+                  appear to round the wrong way. */}
+              {weighted.toFixed(1)} × {freshness.toFixed(3)} = {(weighted * freshness).toFixed(2)},
+              rounded to {score}
             </dd>
           </div>
         </dl>
