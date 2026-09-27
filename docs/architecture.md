@@ -68,6 +68,7 @@ web/
   detail.tsx         The selected finding: evidence, verdict, note, drafts
   action-bar.tsx     Decisions and drafting, pinned under the finding
   undo-toast.tsx     The last decision, its undo and its follow-up
+  new-tab.tsx        The mark on a link that opens a new tab
   scan-status.tsx    Whether each project's latest scan saw everything
   keyboard.tsx       Shortcut keys, the guard every handler shares, and ?
   theme.tsx          System, light or dark

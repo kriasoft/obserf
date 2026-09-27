@@ -1262,3 +1262,16 @@ code {
   color: var(--text);
   word-break: break-word;
 }
+
+/* Sized to the text it follows, in its colour. */
+.new-tab {
+  width: 0.85em;
+  height: 0.85em;
+  margin-left: 0.2em;
+  vertical-align: -0.05em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

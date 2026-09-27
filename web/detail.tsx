@@ -16,6 +16,7 @@ import type { ScoreExplanation } from "../pipeline/score";
 import { type FindingDetail, type TriageOptions, messageOf, requestJson, postJson } from "./api";
 import { isShortcut } from "./keyboard";
 import { ActionBar } from "./action-bar";
+import { NewTab } from "./new-tab";
 
 /**
  * Characters past which a draft opens collapsed to its first dozen lines —
@@ -289,7 +290,8 @@ export function Detail({
             <h1>{finding.title}</h1>
             <p className="meta">
               <a href={finding.url} target="_blank" rel="noreferrer" title={finding.url}>
-                {finding.venue} ↗
+                {finding.venue}
+                <NewTab />
               </a>
               {/* What the model is told beyond the text; bears on `reach` and `welcome`. */}
               {finding.author && <span>by {finding.author}</span>}

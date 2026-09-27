@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from "react";
 import { type DraftKind, type TriageStatus } from "../vocabulary";
 import { KEY_FOR } from "./keyboard";
+import { NewTab } from "./new-tab";
 
 /**
  * What each decision says about Obserf, on the button that makes it. `skipped`
@@ -108,7 +109,8 @@ export function ActionBar({
           aria-keyshortcuts="O"
         >
           <span>
-            Open page ↗ <kbd>o</kbd>
+            Open page
+            <NewTab /> <kbd>o</kbd>
           </span>
           <span className="caption">
             {sourceId === "github" ? "review the repository" : "read the page"}
