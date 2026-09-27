@@ -1,13 +1,30 @@
+/* One palette, both schemes: `light-dark()` picks by `color-scheme`, which
+   follows the OS unless the theme toggle pins it through `data-theme`. */
 :root {
-  --bg: #0f1115;
-  --panel: #161922;
-  --line: #262b38;
-  --text: #e4e7ee;
-  --muted: #8b93a7;
-  --accent: #6ea8fe;
-  --good: #4ade80;
-  --mid: #fbbf24;
-  --bad: #f87171;
+  color-scheme: light dark;
+  --bg: light-dark(#ffffff, #09090b);
+  --panel: light-dark(#fafafa, #121215);
+  --control: light-dark(#f4f4f5, #1b1b1f);
+  --hover: light-dark(#f4f4f6, #16161a);
+  --selected: light-dark(#ececef, #1f1f25);
+  --line: light-dark(#e7e7ea, #232328);
+  --line-strong: light-dark(#d9d9de, #303036);
+  --text: light-dark(#09090b, #f4f4f5);
+  --muted: light-dark(#64646e, #8c8c96);
+  --accent: light-dark(oklch(0.52 0.14 250), oklch(0.74 0.12 250));
+  --accent-bg: light-dark(oklch(0.52 0.14 250 / 0.09), oklch(0.74 0.12 250 / 0.12));
+  --good: light-dark(oklch(0.48 0.13 155), oklch(0.76 0.15 155));
+  --mid: light-dark(oklch(0.5 0.12 70), oklch(0.8 0.14 78));
+  --bad: light-dark(oklch(0.55 0.19 25), oklch(0.7 0.17 25));
+  --bad-bg: light-dark(oklch(0.55 0.19 25 / 0.09), oklch(0.7 0.17 25 / 0.12));
+  /* The operator's own words: warm, apart from the model's blue. */
+  --you-bg: light-dark(oklch(0.97 0.01 85), oklch(0.22 0.012 80));
+  --you-line: light-dark(oklch(0.86 0.02 85), oklch(0.36 0.02 80));
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
   color-scheme: dark;
 }
 
@@ -24,45 +41,128 @@ body {
     -apple-system,
     "Segoe UI",
     sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(320px, 420px) 1fr;
+  /* Narrower below 1500px, so the detail pane keeps its action bar on one row
+     at 1100px; wider above, where the pane has room to spare. */
+  grid-template-columns: clamp(320px, 28vw, 360px) minmax(0, 1fr);
+  /* Header, an optional banner, then the panes; the panes name their row, so an
+     absent banner leaves an empty one. */
+  grid-template-rows: auto auto minmax(0, 1fr);
   height: 100vh;
+}
+@media (width >= 1500px) {
+  .layout {
+    grid-template-columns: clamp(400px, 24vw, 440px) minmax(0, 1fr);
+  }
+}
+.list,
+.detail-column {
+  grid-row: 3;
 }
 .list {
   border-right: 1px solid var(--line);
   overflow-y: auto;
 }
+/* Holds the scrolling pane and the toast that floats over its bottom. */
+.detail-column {
+  position: relative;
+  display: grid;
+  min-height: 0;
+}
 .detail {
   overflow-y: auto;
-  padding: 28px 32px;
+  /* No bottom padding: the action bar is the pane's last thing, pinned there. */
+  padding: 28px 32px 0;
+  container: detail / inline-size;
+}
+/* Grows to fill the pane, so the action bar sits at its bottom even when the
+   finding is short. */
+.detail:has(> .detail-body) {
+  display: flex;
+  flex-direction: column;
+}
+.detail-body {
+  flex: 1 0 auto;
 }
 
-.toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 1;
+/* Scope and filters for both panes, so the list keeps its height for findings. */
+.topbar {
+  grid-column: 1 / -1;
   display: flex;
-  /* Wraps rather than squeezing: in a narrow list pane a label broke over two
-     lines and pushed the count off the edge. */
   flex-wrap: wrap;
-  gap: 8px;
+  /* Tight enough that the whole bar fits one row at 1100px. */
+  gap: 6px;
   align-items: center;
-  padding: 12px 16px;
+  padding: 8px 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
-.toolbar label {
-  display: flex;
+/* A mode that stays on: a small box filled while pressed, beside its name. */
+.toggle {
+  padding-inline: 8px;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  cursor: pointer;
+  gap: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
   white-space: nowrap;
 }
+.toggle::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+.toggle[aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.toggle[aria-pressed="true"]::before {
+  background: currentColor;
+}
+.topbar .spacer {
+  flex: 1;
+}
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+}
+.tabs button {
+  padding-inline: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tabs button[aria-pressed="true"] {
+  background: var(--selected);
+  color: var(--text);
+}
+.tabs .n,
+.toggle .n {
+  font:
+    11px ui-monospace,
+    monospace;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.list-head {
+  margin: 0;
+  padding: 10px 16px 4px;
+}
 .count {
-  margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
 
@@ -71,7 +171,7 @@ button,
 textarea {
   font: inherit;
   color: var(--text);
-  background: #1e2230;
+  background: var(--control);
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 5px 10px;
@@ -79,6 +179,28 @@ textarea {
 }
 button:hover:not(:disabled) {
   border-color: var(--accent);
+}
+/* An icon-only control; its name is its aria-label. */
+button.icon {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+}
+button.icon:hover {
+  color: var(--text);
+}
+button.icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 button:disabled {
   opacity: 0.5;
@@ -91,38 +213,91 @@ button:disabled {
 
 /* A real button, so it is focusable and announced — but shaped like a row. */
 .item {
+  /* The containing block for its screen-reader text, which would otherwise
+     hang at its place in the scrolled list and stretch the page. */
+  position: relative;
   display: grid;
-  grid-template-columns: 40px 1fr;
-  gap: 10px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 12px;
   width: 100%;
   text-align: left;
-  padding: 12px 16px;
+  padding: 10px 16px 10px 14px;
   background: none;
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
 }
 .item:hover {
-  background: #1a1e29;
+  background: var(--hover);
   border-color: var(--line);
 }
 .item[aria-current="true"] {
-  background: #1e2434;
+  background: var(--selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+/* A box of its own, so the column of scores reads down the list at a glance. */
+.item > .score {
+  height: 20px;
+  padding-right: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font:
+    600 12.5px/18px ui-monospace,
+    monospace;
+}
+.item > .score.hidden {
+  border-style: dashed;
+  color: var(--muted);
+}
+.item .body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 .item .title {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 3px;
+  font-weight: 500;
+  line-height: 18px;
+  text-wrap: pretty;
 }
+/* Wraps in a narrow column rather than overflowing it; the venue gives way
+   first. */
 .item .meta {
-  display: block;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  min-width: 0;
   font-size: 12px;
   color: var(--muted);
 }
-.item .meta b {
-  color: var(--text);
-  font-weight: 600;
+.item .meta > * {
+  flex: none;
+}
+/* A 10ch basis, clamped to its own width when shorter, so the rest of the
+   line fits beside it; it then grows back to its full width, and shortens
+   before the line wraps. */
+.item .meta .venue {
+  flex: 1 1 10ch;
+  min-width: 0;
+  max-width: max-content;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.item .meta .project {
+  max-width: 12ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font-size: 11px;
 }
 
 .score {
@@ -130,31 +305,12 @@ button:disabled {
   font-weight: 700;
   text-align: right;
 }
-.score.high {
-  color: var(--good);
+/* The one mark a score carries: a zero a rule forced, named in its title. */
+.score.zeroed {
+  color: var(--bad);
 }
-.score.mid {
-  color: var(--mid);
-}
-.score.low {
-  color: var(--muted);
-}
-
-.components {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  margin: 16px 0;
-}
-.components div {
-  font-size: 12px;
-  color: var(--muted);
-}
-.components b {
-  display: block;
-  font-size: 20px;
-  color: var(--text);
-  font-weight: 600;
+.item > .score.zeroed {
+  border-color: var(--bad);
 }
 
 .flag {
@@ -173,7 +329,7 @@ kbd {
   padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: 4px;
-  background: #0c0e13;
+  background: var(--control);
   font:
     11px ui-monospace,
     monospace;
@@ -182,7 +338,6 @@ kbd {
 
 .note {
   display: block;
-  margin: 20px 0;
 }
 .note textarea {
   display: block;
@@ -201,22 +356,187 @@ kbd {
   margin: 16px 0;
   white-space: pre-wrap;
 }
+/* A card: what it is and when in the head, the text beneath. The body keeps
+   its line breaks; the head and captions do not. */
 .draft {
-  border-color: #2f3a52;
+  display: grid;
+  gap: 8px;
+  border-color: var(--line-strong);
+  white-space: normal;
+}
+.draft p {
+  margin: 0;
 }
 .draft-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 8px;
+}
+.draft-head button {
+  margin-left: auto;
+}
+.draft-text {
+  max-width: 68ch;
+  white-space: pre-wrap;
+  /* A long URL breaks rather than being clipped while Copy takes all of it. */
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+/* The first dozen lines, fading out, until opened. */
+.draft-text.collapsed {
+  max-height: 12lh;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, black 70%, transparent);
+}
+button.link {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
 }
 
-.actions {
+/* Pinned to the bottom of the scrolling pane; spans its padding edge to edge. */
+.action-bar {
+  position: sticky;
+  bottom: 0;
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
-  margin: 20px 0 8px;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: stretch;
+  margin: 24px -32px 0;
+  padding: 10px 32px;
+  flex: none;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+.action-bar :is(.decisions, .tools) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+a.button {
+  display: inline-flex;
+  color: var(--text);
+  text-decoration: none;
+  background: var(--control);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+}
+a.button:hover {
+  border-color: var(--accent);
+}
+/* A label with its key, and a caption beneath that says what the choice means. */
+.stacked {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+  background: transparent;
+}
+.stacked > :first-child {
+  font-weight: 500;
+}
+.stacked .caption {
+  font-size: 11px;
+  color: var(--muted);
+}
+/* Each status has one colour, shared by its dot on the bar and in the toast. */
+[data-status="shortlisted"] {
+  --dot: var(--good);
+}
+[data-status="new"],
+[data-status="skipped"] {
+  --dot: var(--muted);
+}
+[data-status="dismissed"] {
+  --dot: var(--bad);
+}
+[data-status="acted"] {
+  --dot: var(--accent);
+}
+.dot,
+.decisions .stacked > :first-child::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 2px;
+  vertical-align: 1px;
+  background: var(--dot);
+}
+.decisions .stacked .caption {
+  padding-left: 14px;
+}
+.decisions [data-status="dismissed"] {
+  color: var(--bad);
+}
+.decisions [aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--line-strong);
+  cursor: default;
+}
+@container detail (width < 900px) {
+  /* The kind stays in the menu and the button's title. */
+  .action-bar .caption,
+  .action-bar .kind {
+    display: none;
+  }
+}
+
+.split {
+  display: flex;
+  anchor-name: --draft-split;
+}
+.split > button {
+  background: var(--control);
+}
+.split > button:first-child:not(:last-of-type) {
+  border-radius: 6px 0 0 6px;
+}
+.split > button.more {
+  padding: 0 8px;
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  color: var(--muted);
+}
+/* Opens upward from the split button. Without anchor positioning the popover
+   falls back to the browser's centred default, which still works. */
+@supports (anchor-name: --a) {
+  .menu {
+    position-anchor: --draft-split;
+    inset: auto;
+    right: anchor(right);
+    bottom: anchor(top);
+    margin: 0 0 6px;
+  }
+}
+.menu {
+  padding: 4px;
+  min-width: 180px;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--text);
+  box-shadow: 0 8px 24px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
+}
+.menu:popover-open {
+  display: flex;
+}
+.menu button {
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+.menu button:hover {
+  background: var(--hover);
 }
 .muted {
   color: var(--muted);
@@ -235,9 +555,11 @@ a {
   color: var(--accent);
 }
 h1 {
-  font-size: 19px;
-  margin: 0 0 6px;
-  line-height: 1.35;
+  font-size: 20px;
+  margin: 0;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  text-wrap: pretty;
 }
 
 /* The scale a number is on, inside the number's own tile. */
@@ -247,18 +569,24 @@ h1 {
   color: var(--muted);
 }
 
-/* The operator's note on a list row: clamped, and marked as theirs rather than
-   obserf's by the rule down its left edge. */
+/* The operator's note on a list row: clamped, and marked YOU so it is never
+   read as the model's words. */
 .item .rownote {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.item .rownote > :last-child {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
-  margin-top: 5px;
-  padding-left: 7px;
-  border-left: 2px solid var(--line);
-  font-size: 12px;
-  color: var(--muted);
+}
+.item .rownote .chip {
+  flex: none;
 }
 
 /* Earlier verdicts: separated so each reads as one judgment. */
@@ -273,35 +601,13 @@ h1 {
 
 /* What the latest scan changed: the place a review starts. */
 .mark {
-  margin-left: 6px;
   padding: 0 5px;
   border-radius: 3px;
   font-size: 11px;
   font-weight: normal;
-  color: #8fd3e8;
-  border: 1px solid #2c5663;
-}
-
-.undo {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 16px;
-  border-bottom: 1px solid var(--line);
-  background: #171b26;
-}
-.undo > span {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-/* The category prompt after a dismissal: its own line under the undo row. */
-.undo > p {
-  flex-basis: 100%;
-  margin: 0;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-bg);
 }
 
 /* Excerpts run to 60k characters. Above the note box it has to be bounded, or
@@ -311,17 +617,661 @@ h1 {
   overflow: auto;
 }
 
+/* A dot for health and the summary beside it; the full report opens below. */
+.scan-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  anchor-name: --scan-pill;
+}
+.scan-pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone);
+}
+.scan-pill[data-tone="good"] {
+  --tone: var(--good);
+}
+.scan-pill[data-tone="mid"] {
+  --tone: var(--mid);
+}
+.scan-pill[data-tone="bad"] {
+  --tone: var(--bad);
+  color: var(--bad);
+}
+.scan-report {
+  width: min(460px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  padding: 12px 16px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
+}
+@supports (anchor-name: --a) {
+  .scan-report {
+    position-anchor: --scan-pill;
+    inset: auto;
+    top: anchor(bottom);
+    right: anchor(right);
+    margin: 6px 0 0;
+    position-try-fallbacks: flip-inline;
+  }
+}
+.scan-report p {
+  margin: 0;
+}
+
 /* Stacked rather than one line: a scan can be late, short a source and failed
    at once, and a warning wrapped mid-sentence goes unread. */
 .scan {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 7px 16px;
-  border-bottom: 1px solid var(--line);
+  gap: 10px;
 }
 .scan-run {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+.scan-run + .scan-run {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* The `?` overlay. The dialog itself has no padding, so a click that lands on it
+   rather than on its content is a click on the backdrop. */
+dialog.shortcuts {
+  width: min(720px, calc(100% - 48px));
+  padding: 0;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.55));
+}
+dialog.shortcuts::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+dialog.shortcuts > div {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px 22px;
+}
+dialog.shortcuts header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+dialog.shortcuts h2 {
+  margin: 0;
+  font-size: 15px;
+}
+dialog.shortcuts .groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 32px;
+}
+dialog.shortcuts h3 {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+dialog.shortcuts dl {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+}
+dialog.shortcuts dl > div {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+dialog.shortcuts dt {
+  flex: 0 0 72px;
+  white-space: nowrap;
+}
+dialog.shortcuts dd {
+  margin: 0;
+  color: var(--muted);
+}
+dialog.shortcuts kbd {
+  color: var(--text);
+}
+/* With nothing focusable inside, showModal focuses the dialog itself; a ring
+   around the whole overlay marks nothing. */
+dialog.shortcuts:focus-visible {
+  outline: none;
+}
+
+/* Above the action bar when there is one. Where anchor positioning is missing,
+   the bar publishes its height (see ActionBar), and with no finding open the
+   toast sits near the page bottom. */
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--bar-height, 0px) + 8px);
+  translate: -50% 0;
+  z-index: 2;
+  width: max-content;
+  max-width: min(640px, calc(100% - 48px));
+  display: grid;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
+}
+@supports (anchor-name: --a) {
+  .action-bar {
+    anchor-name: --action-bar;
+  }
+  .toast {
+    position-anchor: --action-bar;
+    bottom: anchor(top, 8px);
+    margin-bottom: 8px;
+  }
+}
+/* Room to scroll the last of the finding out from under the toast. */
+.detail-column:has(> .toast) .detail-body {
+  padding-bottom: 140px;
+}
+.toast-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.toast-head > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.toast p {
+  margin: 0;
+}
+.reasons {
+  display: grid;
+  /* Two rows before the names ellipsize past recognition in a narrow pane. */
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px;
+}
+.reasons button {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+  padding: 4px 8px;
+}
+.reasons button:hover:not(:disabled) {
+  border-color: var(--bad);
+}
+.posted {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.posted input {
+  flex: 1;
+  min-width: 220px;
+  font: inherit;
+  color: var(--text);
+  background: var(--control);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+/* The detail pane, in reading order: who and where, what the model says, what
+   the page says, how code scored it, the evidence, drafts, and the note. */
+.detail-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0 32px;
+  align-items: start;
+  max-width: 1120px;
+}
+.detail-body > .main {
+  min-width: 0;
+  max-width: 760px;
+}
+.detail-body > .main > *,
+.rail > * {
+  margin-block: 0 22px;
+}
+/* After the reading column when the pane is narrow; a sticky rail beside it
+   when there is room for both. */
+.rail {
+  min-width: 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+@container detail (width >= 1060px) {
+  .detail-body {
+    grid-template-columns: minmax(0, 760px) 300px;
+  }
+  .rail {
+    position: sticky;
+    /* Clear of the mini title, which hangs 8px into the content box. */
+    top: 16px;
+    padding-top: 4px;
+    border-top: 0;
+  }
+}
+
+/* Styled like the rail's headings, since it is one that opens. */
+.metadata summary {
+  width: fit-content;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.metadata .facts {
+  margin-top: 8px;
+}
+.facts .url {
+  word-break: break-all;
+  user-select: all;
+}
+
+/* Evidence as labelled rows. */
+.facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  font-size: 12.5px;
+}
+.facts div {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.facts dt {
+  flex: 0 0 112px;
+  color: var(--muted);
+}
+.facts dd {
+  display: grid;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.facts .sub {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.detail-body h2 {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.detail-body h2 .count {
+  font-weight: 400;
+  text-transform: none;
+}
+.finding-head {
+  display: grid;
+  gap: 6px;
+}
+.finding-head p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.finding-head .crumbs {
+  font-size: 12px;
+}
+.finding-head .reason {
+  color: var(--bad);
+}
+.pill {
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--dot);
+  font-weight: 500;
+}
+code {
+  font:
+    12px ui-monospace,
+    monospace;
+}
+
+/* Who is speaking: MODEL for the model's judgment, SCORE · CODE for the
+   arithmetic, YOU for the operator. */
+.chip {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font:
+    600 9.5px ui-monospace,
+    monospace;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.chip.model {
+  border-color: transparent;
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.chip.you {
+  border-color: transparent;
+  background: var(--text);
+  color: var(--bg);
+}
+
+.verdict {
+  display: grid;
+  gap: 6px;
+  max-width: 74ch;
+}
+.verdict p {
+  margin: 0;
+}
+.verdict .label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.verdict-text {
+  font-size: 15px;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+.forced {
+  padding: 7px 12px;
+  border-radius: 6px;
+  background: var(--bad-bg);
+  font-size: 12.5px;
+}
+.forced b {
+  color: var(--bad);
+}
+
+.judgment-hidden {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+}
+.judgment-hidden p {
+  flex: 1;
+  margin: 0;
+}
+.judgment-hidden b {
+  color: var(--text);
+}
+
+.detail-body .excerpt {
+  margin: 0;
+  max-width: 74ch;
+  line-height: 1.6;
+}
+
+.scoreline {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.scoreline p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin: 0;
+}
+.scoreline b {
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+}
+.scoreline .score {
+  font-size: 14px;
+}
+.scoreline span[title] {
+  white-space: nowrap;
+}
+
+.note-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.note-label h2 {
+  margin: 0;
+}
+.detail-body .note textarea {
+  margin: 0;
+  border-color: var(--you-line);
+  background: var(--you-bg);
+}
+
+/* The score's arithmetic, one line per step, collapsed until asked for. */
+.working summary {
+  width: fit-content;
+  cursor: pointer;
+}
+.working dl,
+.working p {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 12px;
+}
+.working dl div {
+  display: flex;
+  gap: 10px;
+}
+.working dt {
+  flex: 0 0 130px;
+}
+.working dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+}
+
+/* Read by screen readers, not shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Why the list is empty, or why it could not be read, in place of the rows. */
+.list-state {
+  display: grid;
+  gap: 10px;
+  padding: 28px 20px;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.list-state h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.list-state h2.error {
+  color: var(--bad);
+}
+.list-state p {
+  margin: 0;
+}
+.list-state code {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--control);
+  word-break: break-word;
+}
+.list-state .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.list-state .actions:empty {
+  display: none;
+}
+
+/* The finding's title, pinned once its header scrolls away. Zero height with
+   the bar hanging below, so showing it shifts nothing; the pane's padding is
+   spanned edge to edge. */
+.mini-head {
+  position: sticky;
+  top: -28px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* A flex item of the pane, which would otherwise shrink it on a long finding. */
+  flex: none;
+  height: 36px;
+  margin: -28px -32px -8px;
+  padding: 0 32px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s,
+    visibility 0.12s;
+}
+.mini-head[data-shown="true"] {
+  opacity: 1;
+  visibility: visible;
+}
+.mini-head .title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.mini-head .pill {
+  flex: none;
+  font-size: 12px;
+}
+
+/* A scan landed mid-review: offered, not applied, so the queue holds still. */
+.refresh-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 8px 16px;
+  border-block: 1px solid var(--line);
+  background: var(--accent-bg);
+  font-size: 12.5px;
+}
+.refresh-banner span {
+  flex: 1;
+}
+.refresh-banner.failed {
+  background: var(--bad-bg);
+}
+
+/* The saved note under the title, on the note's own warm panel. */
+.finding-head .you-note {
+  display: flex;
+  /* The header's paragraphs wrap their items; this one's text wraps inside. */
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 7px 10px;
+  border: 1px solid var(--you-line);
+  border-radius: 6px;
+  background: var(--you-bg);
+  color: var(--text);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+.finding-head .you-note .chip {
+  flex: none;
+}
+.finding-head .you-note > :last-child {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  min-width: 0;
+  /* An appended "Posted: <url>" breaks rather than being clipped sideways. */
+  overflow-wrap: anywhere;
+}
+
+/* A failure that changes what every finding can do, under the header. */
+.profile-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bad-bg);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.profile-banner b {
+  color: var(--bad);
+}
+.profile-banner code {
+  color: var(--text);
+  word-break: break-word;
+}
+
+/* Sized to the text it follows, in its colour. */
+.new-tab {
+  width: 0.85em;
+  height: 0.85em;
+  margin-left: 0.2em;
+  vertical-align: -0.05em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }

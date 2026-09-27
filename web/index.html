@@ -1,8 +1,17 @@
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Obserf</title>
+    <!-- A pinned theme before the first paint; app.tsx applies it again once it
+         loads. The key and values must match THEME_KEY in theme.tsx. -->
+    <script>
+      try {
+        const theme = localStorage.getItem("obserf.theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+      } catch {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

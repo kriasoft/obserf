@@ -61,9 +61,41 @@ export function score(
   publishedAt: Date | null | undefined,
   now = new Date(),
 ): number {
-  if (components.disqualified || components.relevance === 0 || components.welcome === 0) {
-    return 0;
-  }
+  return explain(components, publishedAt, now).score;
+}
+
+/** How `score` reached its number, for an operator who disagrees with it. */
+export interface ScoreExplanation {
+  /** The hard zero that applied, the first in the order `score` checks them. */
+  zeroedBy: "disqualified" | "relevance" | "welcome" | null;
+  /** Each component's share of `weighted`: its weight times its value, on 0-100. */
+  terms: Array<{ component: keyof typeof WEIGHTS; value: number; weight: number; points: number }>;
+  /** 0-100 before the age factor; what the score would be on a fresh thread. */
+  weighted: number;
+  /** The age factor applied, from `FRESHNESS_FLOOR` to 1. */
+  freshness: number;
+  score: number;
+}
+
+/**
+ * The hard zero that applies, the first in the order `score` checks them; null
+ * when none does. Independent of the clock, so a list can say which rows are
+ * zero by rule without computing the rest.
+ */
+export function hardZero(components: ScoreComponents): ScoreExplanation["zeroedBy"] {
+  if (components.disqualified) return "disqualified";
+  if (components.relevance === 0) return "relevance";
+  if (components.welcome === 0) return "welcome";
+  return null;
+}
+
+/** `score`, with its working: the one computation both the rank and the inbox read. */
+export function explain(
+  components: ScoreComponents,
+  publishedAt: Date | null | undefined,
+  now = new Date(),
+): ScoreExplanation {
+  const zeroedBy = hardZero(components);
 
   // Unclamped. `AssessmentSchema` accepts only integers 0-5, and every stored
   // row came through it, so a value outside that range is a bug in this program
@@ -76,8 +108,21 @@ export function score(
       WEIGHTS.welcome * components.welcome +
       WEIGHTS.reach * components.reach) /
     5;
+  const factor = freshness(publishedAt, components.opportunity, now);
 
-  return Math.round(100 * weighted * freshness(publishedAt, components.opportunity, now));
+  return {
+    zeroedBy,
+    terms: (Object.keys(WEIGHTS) as Array<keyof typeof WEIGHTS>).map((component) => ({
+      component,
+      value: components[component],
+      weight: WEIGHTS[component],
+      points: (100 * WEIGHTS[component] * components[component]) / 5,
+    })),
+    weighted: 100 * weighted,
+    freshness: factor,
+    // The same expression as before `explain` existed, so no score rounds differently.
+    score: zeroedBy ? 0 : Math.round(100 * weighted * factor),
+  };
 }
 
 /**

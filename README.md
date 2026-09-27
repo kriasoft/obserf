@@ -2,6 +2,8 @@
 
 Obserf ([obserf.com](https://obserf.com)) finds public conversations and listings where mentioning your project could help someone, ranks them, and drafts what to say. **It never posts.**
 
+<img width="2098" height="1280" alt="The Obserf review inbox: a ranked list of findings beside the selected finding's verdict, page excerpt, score and evidence, with the decision bar pinned below" src="https://github.com/user-attachments/assets/e3742d44-c624-4fa6-af82-40045dd34742" />
+
 Maintaining a project leaves little time to promote it. Search turns up hundreds of loosely related pages, and deciding which are active, relevant, and open to a maintainer's contribution takes longer than writing the replies. Obserf narrows that reading to a ranked inbox, with a reason for each finding:
 
 ```
@@ -136,11 +138,12 @@ Use `skipped` for a good finding you will not pursue, and `dismissed` for one Ob
 
 ### Review inbox
 
-`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. **hide reasons** keeps the model's score and reason off a new finding until you have judged it yourself. It is unauthenticated and bound to the local machine. It picks up an edited profile when you return to it; if the edit does not load, it keeps the last version that did and turns drafting off until you fix it. A module the config or a profile imports is not reloaded, so restart it after editing one of those.
+`bun run obserf serve` starts the inbox at **http://127.0.0.1:4000** (`--port` for another). There you can review findings, change their status, write notes, and generate and copy drafts. **Hide judgment** keeps the model's score and reason off a new finding until you have judged it yourself. It is unauthenticated and bound to the local machine. It picks up an edited profile when you return to it; if the edit does not load, it keeps the last version that did and turns drafting off until you fix it. A module the config or a profile imports is not reloaded, so restart it after editing one of those.
 
 | Key | What it does |
 | --- | --- |
 | <kbd>j</kbd> <kbd>k</kbd> or <kbd>↓</kbd> <kbd>↑</kbd> | Move through the list |
+| <kbd>[</kbd> <kbd>]</kbd> | Previous or next status tab |
 | <kbd>o</kbd> | Open the selected page |
 | <kbd>n</kbd> <kbd>s</kbd> <kbd>a</kbd> | Set the status to new, shortlisted or acted |
 | <kbd>x</kbd> | Skipped: a good finding you will not pursue. Counts as Obserf being right |
@@ -148,11 +151,12 @@ Use `skipped` for a good finding you will not pursue, and `dismissed` for one Ob
 | <kbd>u</kbd> | Undo the last status change in this tab |
 | <kbd>1</kbd>–<kbd>8</kbd> | Right after <kbd>d</kbd>: why it was dismissed, which names what to fix |
 | After <kbd>a</kbd> | A field asks where it was posted; <kbd>Enter</kbd> adds it to the note, <kbd>Esc</kbd> skips |
-| <kbd>r</kbd> | Reveal the model's judgment while **hide reasons** is on |
+| <kbd>r</kbd> | Reveal the model's judgment while **Hide judgment** is on |
 | <kbd>W</kbd> | Write the suggested draft (Shift+W; it uses model quota) |
 | <kbd>c</kbd> | Copy the newest draft |
+| <kbd>?</kbd> | Show every shortcut |
 
-Shortcuts are off while you edit a note or use a filter. Notes save when the editor loses focus. Under the filters, the inbox shows the latest scan for each project in view, and says when one skipped a source, never finished, or failed. A short list isn't a quiet week unless the latest scan actually ran. The list stops at 200 results; `200+` means narrow the filters.
+Shortcuts are off while you edit a note or use the project menu. Notes save when the editor loses focus. The pill in the header shows the latest scan for each project in view, and says when one skipped a source, never finished, or failed; click it for the full report. A short list isn't a quiet week unless the latest scan actually ran. The list stops at 200 results, and says so when it does; narrow the filters then.
 
 ## Ranking and rescans
 

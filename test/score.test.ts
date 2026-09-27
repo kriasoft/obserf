@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { freshness, rank, score } from "../pipeline/score";
+import { explain, freshness, rank, score } from "../pipeline/score";
 
 const NOW = new Date("2026-09-09T00:00:00Z");
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * 86_400_000);
@@ -47,6 +47,33 @@ describe("score", () => {
   // component reaching here came through `AssessmentSchema`, which is where that
   // invariant is enforced and tested. Clamping here would have turned a bug in
   // this program into a plausible-looking score.
+});
+
+describe("explain", () => {
+  // The inbox prints these as the working behind the score, so they must add up
+  // to it rather than approximate it.
+  test("its terms add up to the score it reports", () => {
+    const e = explain(
+      { ...perfect, relevance: 4, intent: 2, welcome: 3, reach: 1 },
+      daysAgo(45),
+      NOW,
+    );
+    const sum = e.terms.reduce((total, t) => total + t.points, 0);
+    expect(sum).toBeCloseTo(e.weighted, 9);
+    expect(e.score).toBe(Math.round(e.weighted * e.freshness));
+    expect(e.score).toBe(
+      score({ ...perfect, relevance: 4, intent: 2, welcome: 3, reach: 1 }, daysAgo(45), NOW),
+    );
+  });
+
+  test("names the first hard zero in the order score checks them", () => {
+    expect(
+      explain({ ...perfect, relevance: 0, welcome: 0, disqualified: true }, NOW, NOW).zeroedBy,
+    ).toBe("disqualified");
+    expect(explain({ ...perfect, relevance: 0, welcome: 0 }, NOW, NOW).zeroedBy).toBe("relevance");
+    expect(explain({ ...perfect, welcome: 0 }, NOW, NOW).zeroedBy).toBe("welcome");
+    expect(explain(perfect, NOW, NOW).zeroedBy).toBeNull();
+  });
 });
 
 describe("freshness", () => {

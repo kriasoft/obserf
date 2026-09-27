@@ -1,6 +1,6 @@
 {
   "name": "@obserf/cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Finds public conversations and listings where mentioning your project could help someone, ranks them, and drafts what to say. It never posts.",
   "license": "Apache-2.0",
   "homepage": "https://obserf.com",
