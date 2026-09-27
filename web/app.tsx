@@ -248,6 +248,7 @@ function App() {
     // It described those rows; a focus before the next list arrives reloads.
     listMarker.current = null;
     setNewerScan(null);
+    setScanCheckError(null);
   }, [project, status, withZeros]);
 
   /**
@@ -283,6 +284,8 @@ function App() {
         setItems(rows);
         setListError(null);
         setError(null);
+        // Read just now, so current whatever the last check could not say.
+        setScanCheckError(null);
         // A read requested after the notice answers it, whatever the numbers —
         // they go down when a backup is restored. One requested before can
         // land after it, and clears it only if its rows include that scan.
@@ -366,31 +369,39 @@ function App() {
   const [newerScan, setNewerScan] = useState<{ marker: RunsMarker; ticket: number } | null>(null);
   const scope = useRef(project);
   scope.current = project;
-  useEffect(() => {
-    async function onFocus() {
-      // Nothing to compare with: reload, and let that report any failure.
-      if (!listMarker.current) return changed();
-      // Any list request since this began makes its answer moot.
-      const ticket = listTicket.current;
-      const project = scope.current;
-      const params = project ? `?project=${encodeURIComponent(project)}` : "";
-      try {
-        const now = await requestJson<RunsMarker>(`/api/runs/marker${params}`);
-        if (ticket !== listTicket.current) return;
-        // Read now, not before the request: a load already in flight may have
-        // landed meanwhile with this very scan.
-        const shown = listMarker.current;
-        if (!shown || covers(shown, now)) changed();
-        else setNewerScan({ marker: now, ticket });
-      } catch {
-        // Unknown is not "unchanged": a reload here could reorder the queue
-        // this check exists to hold still. The next focus asks again.
-      }
+  /**
+   * Why the last check could not tell whether a scan landed; null when it could.
+   * Said rather than swallowed: the rows hold still either way, but a queue that
+   * may be stale must not look like one that is known to be current.
+   */
+  const [scanCheckError, setScanCheckError] = useState<string | null>(null);
+  const checkForNewerScan = useCallback(async () => {
+    // Nothing to compare with: reload, and let that report any failure.
+    if (!listMarker.current) return changed();
+    // Any list request since this began makes its answer moot.
+    const ticket = listTicket.current;
+    const project = scope.current;
+    const params = project ? `?project=${encodeURIComponent(project)}` : "";
+    try {
+      const now = await requestJson<RunsMarker>(`/api/runs/marker${params}`);
+      if (ticket !== listTicket.current) return;
+      // Read now, not before the request: a load already in flight may have
+      // landed meanwhile with this very scan.
+      const shown = listMarker.current;
+      setScanCheckError(null);
+      if (!shown || covers(shown, now)) changed();
+      else setNewerScan({ marker: now, ticket });
+    } catch (cause) {
+      // Unknown is not "unchanged": a reload here could reorder the queue
+      // this check exists to hold still.
+      if (ticket === listTicket.current) setScanCheckError(messageOf(cause));
     }
-    const listener = () => void onFocus();
+  }, [changed]);
+  useEffect(() => {
+    const listener = () => void checkForNewerScan();
     window.addEventListener("focus", listener);
     return () => window.removeEventListener("focus", listener);
-  }, [changed]);
+  }, [checkForNewerScan]);
 
   const select = useCallback((id: number) => {
     setSelectedId(id);
@@ -805,13 +816,22 @@ function App() {
         {/* The region is always mounted, so the banner appearing inside it is
             announced; one that mounts with its text often is not. */}
         <div role="status">
-          {newerScan && (
+          {newerScan ? (
             <div className="refresh-banner">
               <span>A scan has run since this list loaded.</span>
               <button type="button" onClick={changed}>
                 Refresh
               </button>
             </div>
+          ) : (
+            scanCheckError && (
+              <div className="refresh-banner failed" title={scanCheckError}>
+                <span>Could not check for newer scans, so this list may be out of date.</span>
+                <button type="button" onClick={() => void checkForNewerScan()}>
+                  Check again
+                </button>
+              </div>
+            )
           )}
         </div>
         {listError && <ListError error={listError} stale={items !== null} onRetry={changed} />}

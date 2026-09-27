@@ -1209,6 +1209,9 @@ code {
 .refresh-banner span {
   flex: 1;
 }
+.refresh-banner.failed {
+  background: var(--bad-bg);
+}
 
 /* The saved note under the title, on the note's own warm panel. */
 .finding-head .you-note {
