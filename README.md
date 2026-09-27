@@ -141,6 +141,7 @@ Use `skipped` for a good finding you will not pursue, and `dismissed` for one Ob
 | Key | What it does |
 | --- | --- |
 | <kbd>j</kbd> <kbd>k</kbd> or <kbd>↓</kbd> <kbd>↑</kbd> | Move through the list |
+| <kbd>[</kbd> <kbd>]</kbd> | Previous or next status tab |
 | <kbd>o</kbd> | Open the selected page |
 | <kbd>n</kbd> <kbd>s</kbd> <kbd>a</kbd> | Set the status to new, shortlisted or acted |
 | <kbd>x</kbd> | Skipped: a good finding you will not pursue. Counts as Obserf being right |

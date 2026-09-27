@@ -32,6 +32,7 @@ const SHORTCUTS: ReadonlyArray<{
       [["j", "↓"], "next finding"],
       [["k", "↑"], "previous finding"],
       [["o"], "open the page"],
+      [["[", "]"], "previous or next status tab"],
       [["?"], "show or hide this list"],
     ],
   },

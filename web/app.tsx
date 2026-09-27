@@ -619,6 +619,17 @@ function App() {
         setShortcutsOpen(true);
         return;
       }
+      // The tabs, in their order on screen; they stop at the ends rather than
+      // wrap, so a held key cannot cycle past the tab it was meant to reach.
+      if (event.key === "[" || event.key === "]") {
+        event.preventDefault();
+        const step = event.key === "]" ? 1 : -1;
+        setStatus((current) => {
+          const index = TRIAGE_STATUSES.indexOf(current) + step;
+          return TRIAGE_STATUSES[Math.min(Math.max(index, 0), TRIAGE_STATUSES.length - 1)]!;
+        });
+        return;
+      }
       // Undo must also work after the last row leaves the filtered list.
       if (event.key === "u") {
         event.preventDefault();
@@ -709,6 +720,7 @@ function App() {
           className="tabs"
           role="group"
           aria-label="Triage status"
+          aria-keyshortcuts="[ ]"
           title={countsError ?? undefined}
         >
           {TRIAGE_STATUSES.map((s) => {
