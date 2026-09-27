@@ -25,6 +25,6 @@ body:
     attributes:
       label: Versions
       description: "`bun --version` and the installed `@obserf/cli` version"
-      placeholder: bun 1.4.2, @obserf/cli 0.2.0
+      placeholder: bun 1.4.2, @obserf/cli 0.3.0
     validations:
       required: true
