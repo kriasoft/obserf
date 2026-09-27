@@ -811,7 +811,8 @@ function App() {
         </div>
       )}
 
-      <div className="list">
+      {/* Landmarks, so a screen reader can jump between the queue and the finding. */}
+      <section className="list" aria-label="Findings">
         <p className="list-head muted small">
           <span
             className="count"
@@ -883,9 +884,9 @@ function App() {
             }
           />
         )}
-      </div>
+      </section>
 
-      <div className="detail-column">
+      <main className="detail-column">
         {/* Always mounted, and empty until a decision: see `announcement`. */}
         <p className="sr-only" aria-live="polite">
           {/* Keyed to the record: a new node inside the region is read even
@@ -926,7 +927,7 @@ function App() {
             onClose={() => closeUndo(undo.seq)}
           />
         )}
-      </div>
+      </main>
       <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </div>
   );
