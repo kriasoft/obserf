@@ -2,6 +2,8 @@
 
 Obserf ([obserf.com](https://obserf.com)) finds public conversations and listings where mentioning your project could help someone, ranks them, and drafts what to say. **It never posts.**
 
+<img width="2098" height="1280" alt="The Obserf review inbox: a ranked list of findings beside the selected finding's verdict, page excerpt, score and evidence, with the decision bar pinned below" src="https://github.com/user-attachments/assets/e3742d44-c624-4fa6-af82-40045dd34742" />
+
 Maintaining a project leaves little time to promote it. Search turns up hundreds of loosely related pages, and deciding which are active, relevant, and open to a maintainer's contribution takes longer than writing the replies. Obserf narrows that reading to a ranked inbox, with a reason for each finding:
 
 ```
