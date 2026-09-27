@@ -26,7 +26,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # No version input: the action reads `packageManager` from package.json,
       # so the pinned Bun is declared in one place rather than two.
       - uses: oven-sh/setup-bun@v2
@@ -57,7 +57,7 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # No version input: the action reads `packageManager` from package.json,
       # so the pinned Bun is declared in one place rather than two.
       - uses: oven-sh/setup-bun@v2
