@@ -71,7 +71,7 @@
     "@types/react-dom": "^19.3.0",
     "better-sqlite3": "^13.0.3",
     "drizzle-kit": "^0.31.10",
-    "oxfmt": "^0.67.0",
+    "oxfmt": "^0.75.0",
     "typescript": "^7"
   }
 }
